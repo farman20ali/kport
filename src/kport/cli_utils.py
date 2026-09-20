@@ -89,6 +89,32 @@ def _is_elevated() -> bool:
     return (os.geteuid() == 0) if hasattr(os, "geteuid") else False
 
 
+def warn_if_path_missing() -> None:
+    """Warn once (to stderr) if ~/.local/bin is not on PATH.
+
+    Only runs on Linux/macOS — Windows uses a different install layout and
+    the check is not relevant there.  The warning is skipped when stdout/stderr
+    are not a TTY (e.g. piped, scripted, or --json mode) so it never pollutes
+    machine-readable output.
+    """
+    if sys.platform == "win32":
+        return
+    if not sys.stderr.isatty():
+        return
+
+    local_bin = os.path.expanduser("~/.local/bin")
+    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    if local_bin not in path_dirs:
+        print(
+            f"\n\033[33m⚠️  ~/.local/bin is not on your PATH — 'kport' may not be "
+            f"found in new shells.\033[0m\n"
+            f"   Add it permanently with one of:\n"
+            f"     echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc && source ~/.bashrc\n"
+            f"     echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zshrc  && source ~/.zshrc\n",
+            file=sys.stderr,
+        )
+
+
 def get_elevation_hint() -> str:
     """Return a one-line actionable hint when a permission error occurs.
 

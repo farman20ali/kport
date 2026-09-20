@@ -36,6 +36,7 @@ from .cli_utils import (
     parse_port_range,
     re_exec_with_sudo,
     validate_port,
+    warn_if_path_missing,
 )
 from .exceptions import InvalidPortError, KPortError, PermissionDeniedError
 from .formatter import Colors, colorize
@@ -48,6 +49,7 @@ __all__ = [
     "EXIT_GENERAL_ERROR",
     "EXIT_INVALID_INPUT",
     "EXIT_OK",
+    "warn_if_path_missing",
     "EXIT_PERMISSION",
     "EXIT_PORT_DOCKER",
     "EXIT_PORT_FREE",
@@ -87,6 +89,7 @@ def _configure_stdio() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
+    warn_if_path_missing()
     parser = _QuietParser(
         description="kport - Cross-platform port inspector and killer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
