@@ -201,34 +201,43 @@ kport-X.Y.Z-setup.exe /S
 
 #### 1. Automated via `manage.py`
 ```powershell
-# Publish current version to WinGet
+# Publish current version to WinGet (auto-detects first-time vs update)
 python manage.py publish --winget
 
-# Publish specific version override
-python manage.py publish --winget --winget-version 5.1.0
+# Publish a specific version
+python manage.py publish --winget --winget-version 5.2.0
 
-# Using live GitHub Release assets
+# Using live GitHub Release installer asset (downloads, hashes, submits)
 python manage.py publish --winget --from-release
 ```
 
-#### 2. First-Time Package Submission (v5.1.0)
-Because `farman20ali.kport` is submitted for the first time, `microsoft/winget-pkgs` does not have an existing package for `wingetcreate update` to modify. Use the first-time onboarding flow:
-```powershell
-# Auto-generate validated manifests and submit PR:
-python scripts/publish_winget.py --publish --first-time
+#### 2. First-Time Package Submission (v5.1.0 — already done)
+> ⚠️ The first-time submission for `farman20ali.kport` was done with v5.1.0.  
+> **Do NOT use `--first-time` again** — the package already exists in `microsoft/winget-pkgs`.
 
-# Or directly submit generated manifest directory:
-wingetcreate submit dist/winget/manifests/f/farman20ali/kport/5.1.0 --token $env:WINGET_GITHUB_TOKEN
+For reference, the first-time flow was:
+```powershell
+# (Historical — already executed for v5.1.0)
+python scripts/publish_winget.py --publish --first-time --version 5.1.0
 ```
 
-#### 3. Subsequent Updates (Next Time)
-Once the first PR is accepted and merged into `microsoft/winget-pkgs`, subsequent versions are fully automated:
+The v5.1.0 manifest files committed to `packaging/winget/manifests/f/farman20ali/kport/5.1.0/` serve as the permanent reference for the initial onboarding. New versions do **not** need new manifest directories committed to this repo.
+
+#### 3. Subsequent Updates (v5.2.0 and beyond)
+For every new release, use `wingetcreate update` — **no manifest files need to be created or committed**:
 ```powershell
-python scripts/publish_packages.py --winget
-# or: wingetcreate update farman20ali.kport --version 5.2.0 --urls "https://github.com/farman20ali/kport/releases/download/v5.2.0/kport-5.2.0-setup.exe" --submit --token $env:WINGET_GITHUB_TOKEN
+# Via publish script (recommended — auto-hashes installer from release, submits PR)
+python scripts/publish_winget.py --publish --version 5.2.0
+
+# Or directly via wingetcreate CLI:
+wingetcreate update farman20ali.kport `
+  --version 5.2.0 `
+  --urls "https://github.com/farman20ali/kport/releases/download/v5.2.0/kport-5.2.0-setup.exe" `
+  --submit `
+  --token $env:WINGET_GITHUB_TOKEN
 ```
 
-A PR is opened against `microsoft/winget-pkgs`. Automated validation tests run, followed by human review.
+A PR is opened automatically against `microsoft/winget-pkgs`. Automated validation tests run, followed by human moderator review (typically 1–3 days).
 
 ---
 
