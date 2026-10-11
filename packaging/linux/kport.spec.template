@@ -4,7 +4,7 @@ Release:        1%{?dist}
 Summary:        Cross-platform port inspector and killer CLI
 
 License:        Apache-2.0
-URL:            https://github.com/farman20ali/port-killer
+URL:            https://github.com/farman20ali/kport
 BuildArch:      noarch
 
 Requires:       python3 >= 3.8

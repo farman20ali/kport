@@ -126,12 +126,12 @@ def create_github_release():
     print("="*60)
     print("To create a GitHub release:")
     print("1. Push your code to GitHub")
-    print("2. Go to: https://github.com/farman20ali/port-killer/releases/new")
+    print("2. Go to: https://github.com/farman20ali/kport/releases/new")
     print("3. Create a new tag (e.g., v1.0.0)")
     print("4. Add release notes")
     print("5. Attach dist files (optional)")
     print("\nUsers can then install with:")
-    print("  pip install git+https://github.com/farman20ali/port-killer.git")
+    print("  pip install git+https://github.com/farman20ali/kport.git")
 
 
 def check_license_metadata():

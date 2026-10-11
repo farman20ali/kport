@@ -84,8 +84,8 @@ class Kport < Formula
   include Language::Python::Virtualenv
 
   desc "Cross-platform port inspector and killer"
-  homepage "https://github.com/farman20ali/port-killer"
-  url "https://github.com/farman20ali/port-killer/releases/download/vX.Y.Z/kport-X.Y.Z.tar.gz"
+  homepage "https://github.com/farman20ali/kport"
+  url "https://github.com/farman20ali/kport/releases/download/vX.Y.Z/kport-X.Y.Z.tar.gz"
   sha256 "<sha256 of tarball>"
   license "Apache-2.0"
 
@@ -123,11 +123,11 @@ pkgver=X.Y.Z
 pkgrel=1
 pkgdesc="Cross-platform port inspector and killer"
 arch=('any')
-url="https://github.com/farman20ali/port-killer"
+url="https://github.com/farman20ali/kport"
 license=('Apache')
 depends=('python')
 makedepends=('python-build' 'python-installer' 'python-wheel')
-source=("https://github.com/farman20ali/port-killer/releases/download/v$pkgver/kport-$pkgver.tar.gz")
+source=("https://github.com/farman20ali/kport/releases/download/v$pkgver/kport-$pkgver.tar.gz")
 sha256sums=('<sha256>')
 
 build() {
@@ -161,7 +161,7 @@ copr-cli create kport --chroot fedora-40-x86_64 --chroot fedora-41-x86_64 \
   --description "Cross-platform port inspector and killer"
 
 copr-cli build kport \
-  https://github.com/farman20ali/port-killer/releases/download/vX.Y.Z/kport-X.Y.Z-1.noarch.rpm
+  https://github.com/farman20ali/kport/releases/download/vX.Y.Z/kport-X.Y.Z-1.noarch.rpm
 ```
 
 Install: `dnf copr enable farman20ali/kport && dnf install kport`
@@ -191,7 +191,7 @@ If silent install works, scaffold and submit:
 
 ```powershell
 winget install wingetcreate
-wingetcreate new https://github.com/farman20ali/port-killer/releases/download/vX.Y.Z/kport-X.Y.Z-setup.exe
+wingetcreate new https://github.com/farman20ali/kport/releases/download/vX.Y.Z/kport-X.Y.Z-setup.exe
 # Package Identifier: farman20ali.kport
 wingetcreate submit
 ```

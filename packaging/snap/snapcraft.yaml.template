@@ -46,15 +46,15 @@ description: |
   Works on Linux, macOS, and Windows. Uses psutil when available for
   richer process info, falls back to native OS tools (ss, lsof, netstat).
 
-  Source & docs: https://github.com/farman20ali/port-killer
+  Source & docs: https://github.com/farman20ali/kport
 
 grade: stable
 confinement: strict
 license: Apache-2.0
 contact: alienhub.dev@gmail.com
-website: https://github.com/farman20ali/port-killer
-issues: https://github.com/farman20ali/port-killer/issues
-source-code: https://github.com/farman20ali/port-killer
+website: https://github.com/farman20ali/kport
+issues: https://github.com/farman20ali/kport/issues
+source-code: https://github.com/farman20ali/kport
 
 apps:
   kport:

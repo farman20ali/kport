@@ -1,9 +1,9 @@
 # 🔪 kport - Cross-Platform Port Inspector and Killer
 
-[![Version](https://img.shields.io/badge/version-5.1.0-blue.svg)](https://github.com/farman20ali/port-killer)
+[![Version](https://img.shields.io/badge/version-5.1.0-blue.svg)](https://github.com/farman20ali/kport)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/farman20ali/port-killer)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/farman20ali/kport)
 
 A powerful, cross-platform command-line tool to inspect, kill, and monitor processes using specific ports — with **AI safety shields**, **Watch Mode**, **Docker awareness**, and an **MCP server** for AI agent integration.
 
@@ -40,7 +40,7 @@ A powerful, cross-platform command-line tool to inspect, kill, and monitor proce
 
 ## 📦 Installation
 
-Pre-compiled platform-native packages are available on the [GitHub Releases](https://github.com/farman20ali/port-killer/releases) page.
+Pre-compiled platform-native packages are available on the [GitHub Releases](https://github.com/farman20ali/kport/releases) page.
 
 | Platform | Format | Quick Install |
 |---|---|---|
@@ -65,15 +65,15 @@ pip install kport
 ### Install from GitHub
 
 ```bash
-pip install --user git+https://github.com/farman20ali/port-killer.git
+pip install --user git+https://github.com/farman20ali/kport.git
 ```
 
 ### Install from Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/farman20ali/port-killer.git
-cd port-killer
+git clone https://github.com/farman20ali/kport.git
+cd kport
 
 # Install to user directory (recommended)
 pip install --user .
@@ -556,8 +556,8 @@ We provide a unified task runner `manage.py` at the root of the project to simpl
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/farman20ali/port-killer.git
-cd port-killer
+git clone https://github.com/farman20ali/kport.git
+cd kport
 
 # 2. Set up the development environment (installs package in editable mode and dev dependencies)
 python manage.py setup
@@ -685,7 +685,7 @@ Colors should work on Windows 10 and later. If you're on an older version, color
 
 Farman Ali Ujjan - [alienhub.dev@gmail.com]
 
-Project Link: [https://github.com/farman20ali/port-killer](https://github.com/farman20ali/port-killer)
+Project Link: [https://github.com/farman20ali/kport](https://github.com/farman20ali/kport)
 
 ---
 

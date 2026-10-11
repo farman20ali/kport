@@ -2,8 +2,8 @@ class Kport < Formula
   include Language::Python::Virtualenv
 
   desc "Cross-platform port inspector and killer"
-  homepage "https://github.com/farman20ali/port-killer"
-  url "https://github.com/farman20ali/port-killer/releases/download/v{version}/kport-{version}.tar.gz"
+  homepage "https://github.com/farman20ali/kport"
+  url "https://github.com/farman20ali/kport/releases/download/v{version}/kport-{version}.tar.gz"
   sha256 "{sha256}"
   license "Apache-2.0"
 

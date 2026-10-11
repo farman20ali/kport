@@ -3,7 +3,7 @@
 **Release Date:** September 10, 2026  
 **Target Release Tag:** `v5.1.0`  
 **Package Version:** `5.1.0`  
-**Repository:** [`farman20ali/port-killer`](https://github.com/farman20ali/port-killer)
+**Repository:** [`farman20ali/kport`](https://github.com/farman20ali/kport)
 
 ---
 

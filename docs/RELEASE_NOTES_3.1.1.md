@@ -62,13 +62,13 @@ pip install --upgrade kport
 
 ### Debian/Ubuntu
 ```bash
-wget https://github.com/farman20ali/port-killer/releases/download/v3.1.1/kport_3.1.1-1_all.deb
+wget https://github.com/farman20ali/kport/releases/download/v3.1.1/kport_3.1.1-1_all.deb
 sudo dpkg -i kport_3.1.1-1_all.deb
 ```
 
 ### From Source
 ```bash
-pip install git+https://github.com/farman20ali/port-killer.git@v3.1.1
+pip install git+https://github.com/farman20ali/kport.git@v3.1.1
 ```
 
 ---
@@ -116,10 +116,10 @@ kport kill 5000 --yes
 
 ## 📚 Documentation
 
-- **Installation Guide:** [INSTALL.md](https://github.com/farman20ali/port-killer/blob/main/INSTALL.md)
-- **Quick Start:** [QUICKSTART.md](https://github.com/farman20ali/port-killer/blob/main/QUICKSTART.md)
-- **Kill Improvements:** [KILL_IMPROVEMENT.md](https://github.com/farman20ali/port-killer/blob/main/KILL_IMPROVEMENT.md)
-- **Contributing:** [CONTRIBUTING.md](https://github.com/farman20ali/port-killer/blob/main/CONTRIBUTING.md)
+- **Installation Guide:** [INSTALL.md](https://github.com/farman20ali/kport/blob/main/INSTALL.md)
+- **Quick Start:** [QUICKSTART.md](https://github.com/farman20ali/kport/blob/main/QUICKSTART.md)
+- **Kill Improvements:** [KILL_IMPROVEMENT.md](https://github.com/farman20ali/kport/blob/main/KILL_IMPROVEMENT.md)
+- **Contributing:** [CONTRIBUTING.md](https://github.com/farman20ali/kport/blob/main/CONTRIBUTING.md)
 
 ---
 
@@ -156,10 +156,10 @@ Thanks to all users who reported issues with stubborn Java processes not being k
 
 ## 📝 License
 
-GNU Affero General Public License v3.0 (AGPL-3.0) - see [LICENSE](https://github.com/farman20ali/port-killer/blob/main/LICENSE) for details.
+GNU Affero General Public License v3.0 (AGPL-3.0) - see [LICENSE](https://github.com/farman20ali/kport/blob/main/LICENSE) for details.
 
 **This license requires sharing source code modifications, even for network/SaaS use.**
 
 ---
 
-**Full Changelog:** https://github.com/farman20ali/port-killer/compare/v3.1.0...v3.1.1
+**Full Changelog:** https://github.com/farman20ali/kport/compare/v3.1.0...v3.1.1

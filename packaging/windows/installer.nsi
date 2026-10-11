@@ -42,8 +42,8 @@ BrandingText      "kport — Cross-platform port inspector and killer"
 !define MUI_WELCOMEPAGE_TEXT  "kport is a cross-platform CLI tool to inspect and kill processes by port.$\r$\n$\r$\nClick Next to install kport ${VERSION}."
 ; NOTE: MUI_FINISHPAGE_RUN intentionally omitted — launching the exe after
 ; install causes issues in Chocolatey automated testing (silent /S mode).
-!define MUI_FINISHPAGE_LINK     "GitHub: github.com/farman20ali/port-killer"
-!define MUI_FINISHPAGE_LINK_LOCATION "https://github.com/farman20ali/port-killer"
+!define MUI_FINISHPAGE_LINK     "GitHub: github.com/farman20ali/kport"
+!define MUI_FINISHPAGE_LINK_LOCATION "https://github.com/farman20ali/kport"
 
 ; ---- Pages --------------------------------------------------
 !insertmacro MUI_PAGE_WELCOME
@@ -80,7 +80,7 @@ Section "kport Core" SecCore
   WriteRegStr   HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\kport" \
                 "InstallLocation"      "$INSTDIR"
   WriteRegStr   HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\kport" \
-                "URLInfoAbout"         "https://github.com/farman20ali/port-killer"
+                "URLInfoAbout"         "https://github.com/farman20ali/kport"
   WriteRegStr   HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\kport" \
                 "DisplayIcon"          "$INSTDIR\kport.exe"
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\kport" \

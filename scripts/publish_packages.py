@@ -46,7 +46,7 @@ if sys.platform == "win32":
 REPO_ROOT  = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-GITHUB_REPO = "farman20ali/port-killer"
+GITHUB_REPO = "farman20ali/kport"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

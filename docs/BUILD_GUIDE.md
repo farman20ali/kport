@@ -479,11 +479,11 @@ python3 snap_publish.py --check
 - [VS Code Extension Publishing](https://code.visualstudio.com/api/working-with-extensions/publishing-extension)
 - [Snapcraft Documentation](https://snapcraft.io/docs)
 - [PyPI Upload](https://packaging.python.org/tutorials/packaging-projects/)
-- [KPort GitHub](https://github.com/farman20ali/port-killer)
+- [KPort GitHub](https://github.com/farman20ali/kport)
 
 ---
 
 ## Support
 
 For issues or questions, please open an issue on GitHub:
-https://github.com/farman20ali/port-killer/issues
+https://github.com/farman20ali/kport/issues

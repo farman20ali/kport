@@ -43,8 +43,8 @@ dev = [
 ]
 
 [project.urls]
-"Bug Reports" = "https://github.com/farman20ali/port-killer/issues"
-"Source" = "https://github.com/farman20ali/port-killer"
+"Bug Reports" = "https://github.com/farman20ali/kport/issues"
+"Source" = "https://github.com/farman20ali/kport"
 
 [project.scripts]
 kport = "kport.cli:main"

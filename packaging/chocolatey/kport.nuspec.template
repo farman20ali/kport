@@ -6,14 +6,14 @@
     <title>kport - Port Inspector and Killer</title>
     <authors>Farman Ali</authors>
     <owners>alienhub</owners>
-    <projectUrl>https://github.com/farman20ali/port-killer</projectUrl>
-    <licenseUrl>https://github.com/farman20ali/port-killer/blob/main/LICENSE</licenseUrl>
+    <projectUrl>https://github.com/farman20ali/kport</projectUrl>
+    <licenseUrl>https://github.com/farman20ali/kport/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <projectSourceUrl>https://github.com/farman20ali/port-killer/tree/main/src/kport</projectSourceUrl>
-    <packageSourceUrl>https://github.com/farman20ali/port-killer/tree/main/packaging/chocolatey</packageSourceUrl>
-    <iconUrl>https://cdn.jsdelivr.net/gh/farman20ali/port-killer@v{VERSION}/assets/icons/icon_128_128.png</iconUrl>
-    <docsUrl>https://github.com/farman20ali/port-killer/blob/main/README.md</docsUrl>
-    <bugTrackerUrl>https://github.com/farman20ali/port-killer/issues</bugTrackerUrl>
+    <projectSourceUrl>https://github.com/farman20ali/kport/tree/main/src/kport</projectSourceUrl>
+    <packageSourceUrl>https://github.com/farman20ali/kport/tree/main/packaging/chocolatey</packageSourceUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/farman20ali/kport@v{VERSION}/assets/icons/icon_128_128.png</iconUrl>
+    <docsUrl>https://github.com/farman20ali/kport/blob/main/README.md</docsUrl>
+    <bugTrackerUrl>https://github.com/farman20ali/kport/issues</bugTrackerUrl>
     <summary>Cross-platform CLI to inspect and free ports used by local processes or Docker.</summary>
     <description>
 kport inspects, explains, and safely frees ports. It supports Docker-aware operations,
@@ -23,7 +23,7 @@ Run `kport mcp` to expose port tools to MCP-compatible clients (VS Code Copilot,
 
 The Windows installer is downloaded from the official GitHub release during installation.
     </description>
-    <releaseNotes>https://github.com/farman20ali/port-killer/releases/tag/v{VERSION}</releaseNotes>
+    <releaseNotes>https://github.com/farman20ali/kport/releases/tag/v{VERSION}</releaseNotes>
     <tags>port kill process network docker devops cli mcp admin</tags>
   </metadata>
 </package>

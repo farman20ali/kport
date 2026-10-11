@@ -6,7 +6,7 @@ This document defines the testing architecture, naming conventions, directory st
 
 ## 1. Directory Structure & Responsibilities
 
-The test suite is located in the [tests/](file:///d:/workspace/dev/port-killer/tests/) directory and is organized into responsibility-driven layers:
+The test suite is located in the [tests/](file:///d:/workspace/dev/kport/tests/) directory and is organized into responsibility-driven layers:
 
 ```text
 tests/
@@ -71,7 +71,7 @@ Test names must explicitly communicate:
 
 ## 3. Fixtures & Test Helpers
 
-All shared test fixtures and helpers are defined centrally in [tests/conftest.py](file:///d:/workspace/dev/port-killer/tests/conftest.py).
+All shared test fixtures and helpers are defined centrally in [tests/conftest.py](file:///d:/workspace/dev/kport/tests/conftest.py).
 
 ### Core Helpers
 - **`FakeInspector`**: A simulated, in-memory implementation of `BaseInspector` that permits custom configuration of PIDs, port bindings, process info, active connections, and listening sockets.

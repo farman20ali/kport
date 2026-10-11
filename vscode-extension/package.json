@@ -8,12 +8,12 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/farman20ali/port-killer.git",
+    "url": "https://github.com/farman20ali/kport.git",
     "directory": "vscode-extension"
   },
-  "homepage": "https://github.com/farman20ali/port-killer#readme",
+  "homepage": "https://github.com/farman20ali/kport#readme",
   "bugs": {
-    "url": "https://github.com/farman20ali/port-killer/issues"
+    "url": "https://github.com/farman20ali/kport/issues"
   },
   "engines": {
     "vscode": "^1.85.0"

@@ -92,7 +92,7 @@ python manage.py publish --choco
 
 #### Option A: GitHub Web UI
 
-1. Go to: https://github.com/farman20ali/port-killer/releases/new
+1. Go to: https://github.com/farman20ali/kport/releases/new
 2. Select tag: `v3.2.4`
 3. Release title: `kport v3.2.4`
 4. Add release notes (features, fixes, breaking changes)
@@ -156,7 +156,7 @@ gh release create v3.2.4 \
 | Debian/Ubuntu | `sudo dpkg -i kport_*.deb` |
 | RHEL/Fedora | `sudo rpm -i kport-*.rpm` |
 | macOS | open `kport-*.pkg` |
-| Source | `pip install git+https://github.com/farman20ali/port-killer.git` |
+| Source | `pip install git+https://github.com/farman20ali/kport.git` |
 
 ---
 

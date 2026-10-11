@@ -8,7 +8,7 @@ ShortDescription: Cross-platform port inspector and killer
 Installers:
   - Architecture: x64
     InstallerType: inno
-    InstallerUrl: https://github.com/farman20ali/port-killer/releases/download/v{version}/kport-{version}-setup.exe
+    InstallerUrl: https://github.com/farman20ali/kport/releases/download/v{version}/kport-{version}-setup.exe
     InstallerSha256: {sha256}
     InstallerSwitches:
       Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
