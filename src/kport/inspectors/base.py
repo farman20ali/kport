@@ -13,12 +13,12 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from typing import Callable
+
+# Fallback for Windows where signal.SIGKILL is not defined in standard library
+SIGKILL = getattr(signal, "SIGKILL", 9)
 
 from kport.constants import RUNTIME_ENRICHMENT_NAMES
-
-# Top-level import — avoids circular import that existed when this was done
-# lazily inside kill_pid().
-from kport.formatter import confirm_prompt
 
 # ---------------------------------------------------------------------------
 # Process name enrichment
@@ -102,6 +102,9 @@ class ProcessInfo:
     exe: str | None = None
     cmdline: list[str] | None = None
     user: str | None = None
+    ppid: int | None = None
+    cwd: str | None = None
+    start_time: float | None = None
 
     def __post_init__(self) -> None:
         """Auto-enrich generic runtime names with their script/jar argument."""
@@ -119,49 +122,93 @@ class PortBinding:
     proto: str = "tcp"
 
 
+@dataclass
+class ConnectionInfo:
+    pid: int | None
+    process_name: str | None
+    proto: str
+    local_address: str
+    local_port: int
+    remote_address: str
+    remote_port: int | None
+    state: str
+
+
 # ---------------------------------------------------------------------------
 # Privilege escalation helpers
 # ---------------------------------------------------------------------------
 
 
 def _escalate_kill_unix(
-    pid: int, sig: int, assume_yes: bool, debug: bool = False
+    pid: int,
+    sig: int,
+    assume_yes: bool,
+    debug: bool = False,
+    confirm_fn: Callable[[str], bool] | None = None,
 ) -> bool:
     """
     Attempt a privilege-escalated kill on Unix via sudo.
     Returns True if the process disappeared after the sudo kill, False otherwise.
     """
-    sig_name = "KILL" if sig == signal.SIGKILL else "TERM"
+    sig_name = "KILL" if sig == SIGKILL else "TERM"
     prompt = (
         f"\nPID {pid} requires elevated privileges (sudo) to terminate. "
         f"Attempt 'sudo kill -{sig_name} {pid}'?"
     )
     if not assume_yes:
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
+        if confirm_fn is None:
             return False
-        if not confirm_prompt(prompt, assume_yes=False):
+        if not confirm_fn(prompt):
             return False
 
     sudo = shutil.which("sudo")
     if not sudo:
+        # Provide actionable hint when sudo is not in PATH (common with pip/pipx installs)
+        _YELLOW = "\033[93m"
+        _RESET = "\033[0m"
+        print(
+            f"{_YELLOW}\n⚠  'sudo' not found in PATH. If kport was installed via pip or pipx,\n"
+            f"   run:  kport setup-sudo   to create a system-wide launcher.\n"
+            f"   Or re-run as:  sudo -E env PATH=\"$PATH\" kport ...{_RESET}",
+            file=sys.stderr,
+        )
         return False
 
     try:
         if debug:
             print(f"[debug] sudo kill -{sig_name} {pid}", file=sys.stderr)
-        result = subprocess.run(
-            [sudo, "kill", f"-{sig_name}", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+
+        # When running in an interactive terminal, inherit stdin/stdout so sudo
+        # can display its password prompt.  In non-interactive contexts (pipes,
+        # CI, JSON mode) we capture output to avoid garbled output.
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        if interactive:
+            result = subprocess.run(
+                [sudo, "kill", f"-{sig_name}", str(pid)],
+                timeout=30,  # longer: user needs time to type password
+                check=False,
+            )
+        else:
+            result = subprocess.run(
+                [sudo, "kill", f"-{sig_name}", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if debug and result.stderr:
+                print(f"[debug] sudo stderr: {result.stderr.strip()}", file=sys.stderr)
         return result.returncode == 0
     except (subprocess.SubprocessError, OSError):
         return False
 
 
-def _escalate_kill_windows(pid: int, assume_yes: bool, debug: bool = False) -> bool:
+def _escalate_kill_windows(
+    pid: int,
+    assume_yes: bool,
+    debug: bool = False,
+    confirm_fn: Callable[[str], bool] | None = None,
+) -> bool:
     """
     Attempt a privilege-escalated kill on Windows via UAC-elevated taskkill.
     Returns True if taskkill reports success.
@@ -170,8 +217,11 @@ def _escalate_kill_windows(pid: int, assume_yes: bool, debug: bool = False) -> b
         f"\nPID {pid} requires elevated privileges (Administrator) to terminate. "
         "Attempt UAC-elevated taskkill?"
     )
-    if not assume_yes and not confirm_prompt(prompt, assume_yes=False):
-        return False
+    if not assume_yes:
+        if confirm_fn is None:
+            return False
+        if not confirm_fn(prompt):
+            return False
 
     ps = shutil.which("powershell") or shutil.which("pwsh")
     if not ps:
@@ -211,8 +261,15 @@ def _escalate_kill_windows(pid: int, assume_yes: bool, debug: bool = False) -> b
 
 
 class BaseInspector:
+    def _clear_cache(self, ttl: float = 0.0) -> None:
+        """Clear cached state. Subclasses may implement process metadata caching."""
+
     def list_listening(self, proto: str = "tcp") -> list[PortBinding]:
         """List all active listening ports."""
+        raise NotImplementedError()
+
+    def list_connections(self) -> list[ConnectionInfo]:
+        """List all active network connections."""
         raise NotImplementedError()
 
     def find_pids_on_port(self, port: int, proto: str = "tcp") -> list[int]:
@@ -222,6 +279,19 @@ class BaseInspector:
     def find_bindings_on_port(self, port: int, proto: str = "tcp") -> list[PortBinding]:
         """Find listening bindings for a specific port."""
         return [b for b in self.list_listening(proto=proto) if b.port == port]
+
+    def find_bindings_for_pid(self, pid: int) -> list[PortBinding]:
+        """Find all listening port bindings owned by *pid*.
+
+        The default implementation filters ``list_listening(proto="both")`` by
+        pid.  On Linux this will miss sockets belonging to root-owned or
+        sandboxed processes when running unprivileged (the inode→PID map built
+        from /proc/<pid>/fd/ is only readable by the owning user or root).
+        Subclasses should override this to apply a per-process /proc/<pid>/net/
+        fallback in that case.
+        """
+        return [b for b in self.list_listening(proto="both") if b.pid == pid]
+
 
     def get_process_info(self, pid: int) -> ProcessInfo | None:
         """Get details about a specific process PID."""
@@ -255,6 +325,7 @@ class BaseInspector:
         dry_run: bool = False,
         assume_yes: bool = False,
         debug: bool = False,
+        confirm_fn: Callable[[str], bool] | None = None,
     ) -> tuple[bool, str]:
         """Terminate *pid* and all of its descendant processes.
 
@@ -278,6 +349,7 @@ class BaseInspector:
                 dry_run=dry_run,
                 assume_yes=assume_yes,
                 debug=debug,
+                confirm_fn=confirm_fn,
             )
             (killed if ok else failed).append((child_pid, msg))
 
@@ -289,6 +361,7 @@ class BaseInspector:
             dry_run=dry_run,
             assume_yes=assume_yes,
             debug=debug,
+            confirm_fn=confirm_fn,
         )
         (killed if ok else failed).append((pid, msg))
 
@@ -311,16 +384,21 @@ class BaseInspector:
     # ------------------------------------------------------------------
 
     def _try_escalate(
-        self, pid: int, sig: int, assume_yes: bool, debug: bool = False
+        self,
+        pid: int,
+        sig: int,
+        assume_yes: bool,
+        debug: bool = False,
+        confirm_fn: Callable[[str], bool] | None = None,
     ) -> bool:
         """
         Attempt privilege-escalated termination.
         Returns True if escalation succeeded (process is gone), False otherwise.
         """
         if platform.system() == "Windows":
-            ok = _escalate_kill_windows(pid, assume_yes, debug=debug)
+            ok = _escalate_kill_windows(pid, assume_yes, debug=debug, confirm_fn=confirm_fn)
         else:
-            ok = _escalate_kill_unix(pid, sig, assume_yes, debug=debug)
+            ok = _escalate_kill_unix(pid, sig, assume_yes, debug=debug, confirm_fn=confirm_fn)
         if ok:
             # Allow OS scheduler time to reap the process
             time.sleep(0.3)
@@ -339,6 +417,7 @@ class BaseInspector:
         dry_run: bool = False,
         assume_yes: bool = False,
         debug: bool = False,
+        confirm_fn: Callable[[str], bool] | None = None,
     ) -> tuple[bool, str]:
         """
         Attempt to terminate a process by PID.
@@ -364,7 +443,7 @@ class BaseInspector:
                     f"[debug] PermissionError on SIGTERM for PID {pid}, attempting escalation",
                     file=sys.stderr,
                 )
-            if self._try_escalate(pid, signal.SIGTERM, assume_yes, debug=debug):
+            if self._try_escalate(pid, signal.SIGTERM, assume_yes, debug=debug, confirm_fn=confirm_fn):
                 return True, "Terminated via privilege escalation"
             return (
                 False,
@@ -388,12 +467,11 @@ class BaseInspector:
                 # operator has explicitly passed --yes (assume_yes=True). This prevents CI/agent
                 # pipelines from silently gaining root-level kill capability without explicit opt-in.
                 # Do not relax this check without a corresponding audit-log feature (see roadmap).
-                if sys.stdin.isatty() and sys.stdout.isatty():
+                if confirm_fn is not None:
                     info = self.get_process_info(pid)
                     pname = f" ({info.name})" if info else ""
-                    if confirm_prompt(
-                        f"\nPID {pid}{pname} is still running after graceful timeout. Force kill?",
-                        assume_yes=assume_yes,
+                    if confirm_fn(
+                        f"\nPID {pid}{pname} is still running after graceful timeout. Force kill?"
                     ):
                         force = True
                 elif assume_yes:
@@ -407,7 +485,7 @@ class BaseInspector:
 
         # Stage 3: Forceful SIGKILL
         try:
-            self.send_signal(pid, signal.SIGKILL)
+            self.send_signal(pid, SIGKILL)
             time.sleep(0.3)
             if not self.is_process_alive(pid):
                 return True, "Killed (force)"
@@ -420,7 +498,7 @@ class BaseInspector:
                     f"[debug] PermissionError on SIGKILL for PID {pid}, attempting escalation",
                     file=sys.stderr,
                 )
-            if self._try_escalate(pid, signal.SIGKILL, assume_yes, debug=debug):
+            if self._try_escalate(pid, SIGKILL, assume_yes, debug=debug, confirm_fn=confirm_fn):
                 return True, "Force-killed via privilege escalation"
             return False, "Permission denied on force kill — could not escalate."
         except Exception as e:  # noqa: BLE001 - catch arbitrary exceptions during signal dispatch
@@ -440,6 +518,7 @@ class BaseInspector:
         assume_yes: bool = False,
         kill_tree: bool = False,
         proto: str = "tcp",
+        confirm_fn: Callable[[str], bool] | None = None,
     ) -> tuple[bool, str]:
         """
         Kill all processes using a specific port.
@@ -471,6 +550,7 @@ class BaseInspector:
                     dry_run=dry_run,
                     assume_yes=assume_yes,
                     debug=debug,
+                    confirm_fn=confirm_fn,
                 )
             else:
                 ok, msg = self.kill_pid(
@@ -480,6 +560,7 @@ class BaseInspector:
                     dry_run=dry_run,
                     assume_yes=assume_yes,
                     debug=debug,
+                    confirm_fn=confirm_fn,
                 )
             if ok:
                 killed_count += 1
@@ -488,6 +569,7 @@ class BaseInspector:
                 errors.append(f"PID {pid}: {msg}")
 
         # Linux fuser fallback — only when forced and fuser is available
+        _fuser_proto = proto if proto in ("tcp", "udp") else "tcp"
         if (
             remaining_pids
             and platform.system() != "Windows"
@@ -496,12 +578,12 @@ class BaseInspector:
         ):
             if debug:
                 print(
-                    f"[debug] PIDs {remaining_pids} survived standard signals. Triggering fuser fallback...",
+                    f"[debug] PIDs {remaining_pids} survived standard signals. Triggering fuser fallback ({_fuser_proto})...",
                     file=sys.stderr,
                 )
             try:
                 subprocess.run(
-                    ["fuser", "-k", f"{port}/tcp"],
+                    ["fuser", "-k", f"{port}/{_fuser_proto}"],
                     capture_output=True,
                     text=True,
                     timeout=5,
@@ -510,7 +592,7 @@ class BaseInspector:
                 time.sleep(0.5)
                 remaining_pids = [p for p in remaining_pids if self.is_process_alive(p)]
                 if not remaining_pids:
-                    return True, f"Port {port} successfully freed via fuser fallback"
+                    return True, f"Port {port} successfully freed via fuser fallback ({_fuser_proto})"
             except (subprocess.SubprocessError, OSError) as e:
                 errors.append(f"fuser fallback failed: {e}")
 

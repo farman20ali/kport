@@ -10,10 +10,100 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from . import audit
+from .diagnostics import diagnose_port
 from .docker_engine import docker_action_on_container, list_docker_mappings
 from .formatter import Colors, colorize, confirm_prompt
 from .inspectors import BaseInspector
 from .process_manager import detect_process_manager
+from .safety import check_safety_policy, load_kport_config
+
+
+def _format_diagnose_lines(data: dict[str, Any]) -> list[str]:
+    """Helper to convert the dictionary returned by diagnose_port() to display lines."""
+    lines = []
+    is_blocked = data["blocked"]
+    observations = data["observations"]
+    inferences = data["inferences"]
+    risks = data["risks"]
+    recommendations = data["recommendations"]
+    obs_type = observations["type"]
+    obs_processes = observations["processes"]
+    obs_docker = observations["docker_containers"]
+    obs_bindings = observations["bindings"]
+    port = data["port"]
+
+    lines.append(f"=== DIAGNOSTICS FOR PORT {port} ===")
+    lines.append("")
+
+    # Section 1: OBSERVATION
+    lines.append("OBSERVATION")
+    lines.append(f"  Status: {'OCCUPIED' if is_blocked else 'FREE'}")
+    if obs_type == "docker":
+        lines.append("  Type:   Docker Container Mapping")
+        for d in obs_docker:
+            lines.append(f"  Container: {d['container_name']} ({d['container_id'][:12]})")
+            lines.append(f"  Image:     {d['image']}")
+            lines.append(f"  Mapping:   host {d['host_port']} -> container {d['container_port']}")
+            lines.append(f"  Status:    {d['status']}")
+    elif obs_type == "local":
+        lines.append("  Type:   Local Process Binding")
+        for p in obs_processes:
+            lines.append(f"  - PID {p['pid']} ({p['name']})")
+            if p.get("user"):
+                lines.append(f"    User:       {p['user']}")
+            if p.get("exe"):
+                lines.append(f"    Executable: {p['exe']}")
+            if p.get("cmdline"):
+                lines.append(f"    Command:    {' '.join(p['cmdline'])}")
+    elif obs_type == "local-unknown":
+        lines.append("  Type:   Local Binding (Process Unidentified)")
+        lines.append("  Warning: Port active but owning process not visible.")
+        for b in obs_bindings:
+            lines.append(f"  - Family {b['family']} binding: {b['laddr']} ({b['proto'].upper()} - {b['state'] or 'UNKNOWN'})")
+    else:
+        lines.append("  No processes or containers are bound to this port.")
+    lines.append("")
+
+    # Section 2: INFERENCE
+    lines.append("INFERENCE")
+    if inferences:
+        for inf in inferences:
+            if inf["type"] == "process_manager":
+                lines.append(f"  - [Process Manager] PID {inf['pid']} appears to be managed by {inf['manager']} service '{inf['name']}'")
+            elif inf["type"] == "docker_isolation":
+                lines.append(f"  - [Docker Isolation] Container {inf['container_name']} isolates execution in network namespace")
+            elif inf["type"] == "project_context":
+                proj_label = inf.get("project_name") or inf.get("git_root") or "unknown"
+                branch_label = f" ({inf['branch']})" if inf.get("branch") else ""
+                wt_label = " [worktree]" if inf.get("is_worktree") else ""
+                origin_label = f" — {inf['remote_origin']}" if inf.get("remote_origin") else ""
+                confidence = inf.get("confidence", "medium")
+                lines.append(f"  - [Project Context / confidence:{confidence}] PID {inf['pid']} cwd is inside repo '{proj_label}'{branch_label}{wt_label}{origin_label}")
+    else:
+        lines.append("  No inferred process relationships detected.")
+    lines.append("")
+
+    # Section 3: RISKS
+    lines.append("RISKS")
+    if risks:
+        for r in risks:
+            lines.append(f"  - [{r['severity']}] {r['message']}")
+    else:
+        lines.append("  No significant security or execution risks detected.")
+    lines.append("")
+
+    # Section 4: RECOMMENDATION
+    lines.append("RECOMMENDATION")
+    for rec in recommendations:
+        lines.append(f"  - Action: {rec['action'].upper()}")
+        lines.append(f"    Reason: {rec['reason']}")
+        if rec.get("command"):
+            lines.append(f"    Fix:    {rec['command']}")
+    lines.append("")
+
+    return lines
+
 
 
 def _fetch_interactive_rows(inspector: BaseInspector) -> list[dict[str, Any]]:
@@ -89,13 +179,49 @@ def _fallback_numbered_menu(inspector: BaseInspector, args: Any) -> int:
     try:
         inp = input(
             colorize(
-                "\nEnter number(s) to kill (comma separated, e.g. 1, 3) or 'q' to quit: ",
+                "\nEnter number(s) to kill (e.g. 1, 3), 'd <num>' to diagnose (e.g. d 1), or 'q' to quit: ",
                 Colors.YELLOW,
             )
         ).strip()
         if not inp or inp.lower() == "q":
             print("Cancelled.")
             return 0
+
+        if inp.lower().startswith("d "):
+            target_token = inp[2:].strip()
+            if target_token.isdigit():
+                val = int(target_token)
+                if 1 <= val <= len(rows):
+                    target_row = rows[val - 1]
+                    cfg = load_kport_config()
+                    config = {}
+                    config_ports = getattr(args, "protected_ports", None)
+                    if isinstance(config_ports, list):
+                        config["protected_ports"] = config_ports
+                    config_procs = getattr(args, "protected_processes", None)
+                    if isinstance(config_procs, list):
+                        config["protected_processes"] = config_procs
+                    if not config and cfg:
+                        config = cfg
+
+                    bypass = getattr(args, "bypass_safety", False)
+                    try:
+                        diag_res = diagnose_port(
+                            port=target_row["port"],
+                            inspector=inspector,
+                            proto=target_row.get("proto", "tcp"),
+                            config=config if config else None,
+                            bypass_safety=bypass,
+                        )
+                        diag_lines = _format_diagnose_lines(diag_res)
+                        print(colorize(f"\n--- Diagnosis for port {target_row['port']} ---", Colors.CYAN + Colors.BOLD))
+                        for line in diag_lines:
+                            print(line)
+                    except Exception as e:  # noqa: BLE001
+                        print(colorize(f"\nError diagnosing port: {e}", Colors.RED))
+
+                    input("\nPress Enter to continue...")
+                    return _fallback_numbered_menu(inspector, args)
 
         selected_indices = []
         for token in inp.split(","):
@@ -122,6 +248,33 @@ def _execute_kills(
     """Execute kill action on all user-selected items."""
     if not selected_rows:
         return 0
+
+    # Safety check before confirmation or execution
+    cfg = load_kport_config()
+    bypass = getattr(args, "bypass_safety", False)
+    config = {}
+    config_ports = getattr(args, "protected_ports", None)
+    if isinstance(config_ports, list):
+        config["protected_ports"] = config_ports
+    config_procs = getattr(args, "protected_processes", None)
+    if isinstance(config_procs, list):
+        config["protected_processes"] = config_procs
+    if not config and cfg:
+        config = cfg
+
+    for r in selected_rows:
+        if r["type"] != "docker":
+            pids = inspector.find_pids_on_port(r["port"], proto=r.get("proto", "tcp"))
+            allowed, reason = check_safety_policy(
+                port=r["port"],
+                pids=pids,
+                inspector=inspector,
+                bypass_safety=bypass,
+                config=config if config else None,
+            )
+            if not allowed:
+                print(colorize(f"\n✗ {reason}", Colors.RED))
+                return 1
 
     # Confirmation gate unless yes/assume_yes is specified
     assume_yes = getattr(args, "yes", False)
@@ -171,13 +324,24 @@ def _execute_kills(
                 errors += 1
         else:
             kill_tree = getattr(args, "kill_tree", False)
+            dry_run = getattr(args, "dry_run", False)
             ok, msg = inspector.kill_port(
                 r["port"],
                 force=getattr(args, "force", False),
-                dry_run=getattr(args, "dry_run", False),
+                dry_run=dry_run,
                 assume_yes=True,
                 kill_tree=kill_tree,
                 proto=r.get("proto", "tcp"),
+            )
+            # Emit audit record for every local kill attempt (success or failure).
+            # r["pid"] is the integer PID displayed in the TUI row for local entries.
+            tui_pids = [r["pid"]] if isinstance(r.get("pid"), int) else []
+            audit.log_kill_port(
+                port=r["port"],
+                pids=tui_pids,
+                dry_run=dry_run,
+                success=ok,
+                message=msg,
             )
             if ok:
                 print(
@@ -258,7 +422,7 @@ def run_interactive_picker(inspector: BaseInspector, args: Any) -> int:
                 pass
 
             # Header
-            header = " kport Interactive Picker | Type to filter  [Space] Select  [Ctrl-r] Refresh  [Enter] Kill  [Esc] Quit"
+            header = " kport Interactive Picker | Type to filter  [Space] Select  [d] Diagnose  [Ctrl-r] Refresh  [Enter] Kill  [Esc] Quit"
             stdscr.addstr(
                 0, 0, header[: max_x - 1], curses.A_BOLD | curses.color_pair(1)
             )
@@ -328,6 +492,90 @@ def run_interactive_picker(inspector: BaseInspector, args: Any) -> int:
                 else:
                     return None
 
+            # Handle diagnose key
+            elif ch in (ord("d"), ord("D")):
+                if not filtered_rows:
+                    try:
+                        curses.curs_set(0)
+                    except curses.error:
+                        pass
+                    stdscr.addstr(1, 0, "No active port to diagnose.", curses.color_pair(3))
+                    stdscr.refresh()
+                    curses.napms(1500)
+                else:
+                    target_row = filtered_rows[current_idx]
+                    port_to_diagnose = target_row["port"]
+                    proto_to_diagnose = target_row.get("proto", "tcp")
+
+                    cfg = load_kport_config()
+                    config = {}
+                    config_ports = getattr(args, "protected_ports", None)
+                    if isinstance(config_ports, list):
+                        config["protected_ports"] = config_ports
+                    config_procs = getattr(args, "protected_processes", None)
+                    if isinstance(config_procs, list):
+                        config["protected_processes"] = config_procs
+                    if not config and cfg:
+                        config = cfg
+
+                    bypass = getattr(args, "bypass_safety", False)
+
+                    try:
+                        diag_res = diagnose_port(
+                            port=port_to_diagnose,
+                            inspector=inspector,
+                            proto=proto_to_diagnose,
+                            config=config if config else None,
+                            bypass_safety=bypass,
+                        )
+                        diag_lines = _format_diagnose_lines(diag_res)
+                    except Exception as e:  # noqa: BLE001
+                        diag_lines = [
+                            f"=== DIAGNOSTICS FOR PORT {port_to_diagnose} ===",
+                            "",
+                            "Error: Failed to compute diagnostics.",
+                            f"Details: {e}",
+                        ]
+
+                    diag_scroll = 0
+                    while True:
+                        my, mx = stdscr.getmaxyx()
+                        by = max(0, 2)
+                        bx = max(0, 2)
+                        bh = max(1, my - 4)
+                        bw = max(1, mx - 4)
+
+                        stdscr.clear()
+
+                        modal_title = f" Diagnosis overlay — Port {port_to_diagnose}  [Esc/q] Close "
+                        stdscr.addstr(by, bx, modal_title[:bw-1], curses.A_REVERSE | curses.A_BOLD)
+
+                        instr = " [Up/Down] Scroll  [Esc/q] Close overlay "
+                        stdscr.addstr(by + bh - 1, bx, instr[:bw-1], curses.A_REVERSE)
+
+                        visible_diag_lines = bh - 2
+
+                        for line_idx in range(visible_diag_lines):
+                            actual_idx = diag_scroll + line_idx
+                            if actual_idx < len(diag_lines):
+                                line_content = " " + diag_lines[actual_idx]
+                                stdscr.addstr(by + 1 + line_idx, bx, line_content[:bw-1])
+
+                        stdscr.refresh()
+
+                        try:
+                            diag_ch = stdscr.getch()
+                        except KeyboardInterrupt:
+                            break
+
+                        if diag_ch in (27, ord("q"), ord("Q")):
+                            break
+                        elif diag_ch in (curses.KEY_UP, ord("k"), ord("K")):
+                            diag_scroll = max(0, diag_scroll - 1)
+                        elif diag_ch in (curses.KEY_DOWN, ord("j"), ord("J")):
+                            max_scroll = max(0, len(diag_lines) - visible_diag_lines)
+                            diag_scroll = min(max_scroll, diag_scroll + 1)
+
             # Handle execution / Enter key
             elif ch in (10, 13):
                 selected = [r for r in rows if r["selected"]]
@@ -360,6 +608,9 @@ def run_interactive_picker(inspector: BaseInspector, args: Any) -> int:
             print("Cancelled.")
             return 0
         return _execute_kills(inspector, selected_targets, args)
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        return 0
     except Exception:  # noqa: BLE001 - fallback to text menu on any curses exception
         # If curses initialization fails (e.g. TERM missing or unsupported terminal)
         return _fallback_numbered_menu(inspector, args)

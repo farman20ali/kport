@@ -99,7 +99,7 @@ pytest tests/ -v
 
 ## 🔗 Resources
 
-- **GitHub Repository**: [port-killer](https://github.com/yourusername/port-killer)
+- **GitHub Repository**: [kport](https://github.com/yourusername/kport)
 - **Installation**: See [INSTALL.md](INSTALL.md)
 - **Quick Start**: See [QUICKSTART.md](../QUICKSTART.md)
 - **Contributing**: See [CONTRIBUTING.md](../CONTRIBUTING.md)

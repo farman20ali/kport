@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$url = 'https://github.com/farman20ali/port-killer/releases/download/v{VERSION}/kport-{VERSION}-setup.exe'
+$url = 'https://github.com/farman20ali/kport/releases/download/v{VERSION}/kport-{VERSION}-setup.exe'
 $checksum = '{CHECKSUM}'
 $checksumType = 'sha256'
 

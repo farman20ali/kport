@@ -7,49 +7,89 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
 import sys
-import time
-from dataclasses import asdict
-from typing import Any
 
-from . import __version__, audit
-from .constants import PROTECTED_PORTS, PROTECTED_PROCESS_NAMES
-from .docker_engine import (
-    docker_action_on_container,
-    docker_mappings_for_host_port,
-    list_docker_mappings,
+from . import __version__
+from .cli_commands import (
+    DEFAULT_PROTECTED_PORTS,
+    DEFAULT_PROTECTED_PROCESS_NAMES,
+    handle_connections,
+    handle_diagnose,
+    handle_doctor,
+    handle_legacy_command,
+    handle_product_command,
+    handle_stop_service,
+)
+from .cli_utils import (
+    EXIT_GENERAL_ERROR,
+    EXIT_INTERRUPTED,
+    EXIT_INVALID_INPUT,
+    EXIT_OK,
+    EXIT_PERMISSION,
+    EXIT_PORT_DOCKER,
+    EXIT_PORT_FREE,
+    _poll_until_free,
+    apply_config_defaults,
+    check_safety_policy,
+    confirm_docker_rm,
+    get_elevation_hint,
+    load_config,
+    parse_port_range,
+    re_exec_with_sudo,
+    validate_port,
+    warn_if_path_missing,
 )
 from .exceptions import InvalidPortError, KPortError, PermissionDeniedError
-from .formatter import (
-    Colors,
-    choose_docker_action,
-    colorize,
-    confirm_prompt,
-    jsonify_bindings,
-    print_table_docker,
-    print_table_list_product,
-    print_table_listen,
-)
-from .inspectors import BaseInspector, get_inspector
-from .notify import notify as _desktop_notify
-from .process_manager import detect_process_manager
-from .profile import load_profiles, resolve_profile
+from .formatter import Colors, colorize
+from .inspectors import get_inspector
 
-# Exit codes
-EXIT_OK = 0
-EXIT_GENERAL_ERROR = 1
-EXIT_INVALID_INPUT = 2
-EXIT_PERMISSION = 3
-EXIT_PORT_DOCKER = 4
-EXIT_PORT_FREE = 5
+# Re-export compatibility symbols for external callers and tests
+__all__ = [
+    "DEFAULT_PROTECTED_PORTS",
+    "DEFAULT_PROTECTED_PROCESS_NAMES",
+    "EXIT_GENERAL_ERROR",
+    "EXIT_INTERRUPTED",
+    "EXIT_INVALID_INPUT",
+    "EXIT_OK",
+    "EXIT_PERMISSION",
+    "EXIT_PORT_DOCKER",
+    "EXIT_PORT_FREE",
+    "_poll_until_free",
+    "apply_config_defaults",
+    "check_safety_policy",
+    "confirm_docker_rm",
+    "handle_connections",
+    "handle_diagnose",
+    "handle_doctor",
+    "handle_product_command",
+    "handle_stop_service",
+    "load_config",
+    "main",
+    "parse_port_range",
+    "validate_port",
+    "warn_if_path_missing",
+]
 
 
 class _QuietParser(argparse.ArgumentParser):
+    _raw_argv: list[str] | None = None
+
     def error(self, message: str) -> None:
-        print(colorize(f"Error: {message}", Colors.RED), file=sys.stderr)
-        print("Run 'kport --help' for usage.", file=sys.stderr)
+        raw = self._raw_argv if self._raw_argv is not None else sys.argv[1:]
+        if "--json" in raw:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": None,
+                    "error": {
+                        "code": "invalid_arguments",
+                        "message": message,
+                    },
+                })
+            )
+        else:
+            print(colorize(f"Error: {message}", Colors.RED), file=sys.stderr)
+            print("Run 'kport --help' for usage.", file=sys.stderr)
         sys.exit(EXIT_INVALID_INPUT)
 
 
@@ -64,1519 +104,9 @@ def _configure_stdio() -> None:
             pass
 
 
-# Default safety policies — imported from constants to share with MCP server.
-# These are used as the starting baseline; config can only ADD to these, never replace.
-DEFAULT_PROTECTED_PORTS = PROTECTED_PORTS
-DEFAULT_PROTECTED_PROCESS_NAMES = PROTECTED_PROCESS_NAMES
-
-
-def check_safety_policy(
-    port: int | None,
-    pids: list[int],
-    args: argparse.Namespace,
-    inspector: BaseInspector,
-) -> tuple[bool, str]:
-    """
-    Check if a port or any associated PIDs are protected by safety policies.
-    Returns (True, "") if safety policy permits, or (False, error_msg) if blocked.
-    """
-    bypass = getattr(args, "bypass_safety", False)
-
-    # R16 fix: config overrides are ADDITIVE, not replacements.
-    # A user setting protected_ports:[8080] should ADD to the defaults,
-    # not silently unprotect SSH (22), Redis (6379), etc.
-    protected_ports = set(DEFAULT_PROTECTED_PORTS)
-    config_ports = getattr(args, "protected_ports", None)
-    if isinstance(config_ports, list):
-        protected_ports.update(config_ports)  # additive
-
-    protected_procs = set(DEFAULT_PROTECTED_PROCESS_NAMES)
-    config_procs = getattr(args, "protected_processes", None)
-    if isinstance(config_procs, list):
-        protected_procs.update(p.lower() for p in config_procs)  # additive
-
-    # Check Port protection
-    if port is not None and port in protected_ports:
-        if bypass:
-            debug_log(
-                getattr(args, "debug", False),
-                f"Safety shield bypassed for protected port {port}",
-            )
-        else:
-            return (
-                False,
-                f"Security Shield Active: Port {port} is a protected port. Action aborted. Use --bypass-safety to override.",
-            )
-
-    # Check Process protection
-    for pid in pids:
-        try:
-            info = inspector.get_process_info(pid)
-            if info and info.name.lower().split(" (")[0] in protected_procs:
-                if bypass:
-                    debug_log(
-                        getattr(args, "debug", False),
-                        f"Safety shield bypassed for protected process '{info.name}' (PID {pid})",
-                    )
-                else:
-                    return (
-                        False,
-                        f"Security Shield Active: PID {pid} runs critical process '{info.name}' which is protected. Action aborted. Use --bypass-safety to override.",
-                    )
-        except (OSError, AttributeError, ValueError, IndexError):
-            pass
-
-    return True, ""
-
-
-def debug_log(enabled: bool, msg: str) -> None:
-    if enabled:
-        print(colorize(f"[debug] {msg}", Colors.BLUE), file=sys.stderr)
-
-
-def confirm_docker_rm(
-    container_name: str,
-    container_id: str,
-    assume_yes: bool,
-    force: bool,
-    image: str = "",
-    host_port: int | None = None,
-    container_port: int | None = None,
-) -> bool:
-    """
-    Confirmation gate for docker rm.
-
-    Shows a rich context card with container name, image, port mapping, and
-    short ID, then asks a simple [y/N] prompt.  The user never has to type
-    a container name — just 'y' to confirm.
-
-    --yes --force together skips the prompt entirely (non-interactive mode).
-    --yes alone still shows the prompt because rm is irreversible.
-    """
-    if assume_yes and force:
-        return True
-    if assume_yes and not force:
-        print(
-            colorize(
-                "Error: Removing a Docker container is irreversible. "
-                "Use --force in addition to --yes to bypass interactive confirmation.",
-                Colors.RED,
-            ),
-            file=sys.stderr,
-        )
-        return False
-
-    short_id = container_id[:12] if container_id else "unknown"
-    port_info = (
-        f"{host_port} → {container_port}"
-        if host_port and container_port
-        else str(host_port or "?")
-    )
-
-    print()
-    print(
-        colorize(
-            "  ⚠️  DESTRUCTIVE ACTION — This cannot be undone",
-            Colors.YELLOW + Colors.BOLD,
-        )
-    )
-    print(colorize("  " + "─" * 46, Colors.YELLOW))
-    print(colorize(f"  Container   : {container_name}", Colors.WHITE))
-    if image:
-        print(colorize(f"  Image       : {image}", Colors.WHITE))
-    print(colorize(f"  Port        : {port_info}", Colors.WHITE))
-    print(colorize(f"  Container ID: {short_id}", Colors.WHITE))
-    print(colorize("  " + "─" * 46, Colors.YELLOW))
-    print()
-    try:
-        user_input = (
-            input(colorize("  Remove this container? [y/N]: ", Colors.MAGENTA))
-            .strip()
-            .lower()
-        )
-        if user_input in ("y", "yes"):
-            return True
-        print(colorize("Aborted.", Colors.YELLOW))
-        return False
-    except KeyboardInterrupt:
-        print()
-        raise
-
-
-def _is_elevated() -> bool:
-    """P1 fix: detect if the current process is running with root/admin privileges."""
-    if sys.platform == "win32":
-        try:
-            import ctypes
-
-            return ctypes.windll.shell32.IsUserAnAdmin() != 0
-        except (AttributeError, OSError):
-            return False
-    return (os.geteuid() == 0) if hasattr(os, "geteuid") else False
-
-
-def _poll_until_free(
-    port: int, timeout: float, inspector: BaseInspector, interval: float = 0.2
-) -> bool:
-    """
-    Poll the port until it has no active bindings, up to `timeout` seconds.
-    Returns True if the port becomes free, False on timeout.
-    """
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            bindings = inspector.find_bindings_on_port(port)
-        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-            bindings = []
-        if not bindings:
-            return True
-        time.sleep(interval)
-    try:
-        bindings = inspector.find_bindings_on_port(port)
-    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-        bindings = []
-    return len(bindings) == 0
-
-
-def _default_config_paths() -> list[str]:
-    home = os.path.expanduser("~")
-    return [
-        os.path.join(os.getcwd(), ".kport.json"),
-        os.path.join(home, ".kport.json"),
-        os.path.join(home, ".config", "kport", "config.json"),
-    ]
-
-
-def load_config(config_path: str | None, debug: bool = False) -> dict[str, Any]:
-    """Load optional JSON configuration defaults."""
-    candidate_paths = [config_path] if config_path else _default_config_paths()
-
-    for path in candidate_paths:
-        if not path:
-            continue
-        path = os.path.expanduser(path)
-        if not os.path.exists(path):
-            continue
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                debug_log(debug, f"Loaded config: {path}")
-                return data
-            debug_log(debug, f"Ignoring non-object config: {path}")
-        except json.JSONDecodeError as e:
-            print(
-                colorize(f"Error: invalid JSON in config file {path}: {e}", Colors.RED),
-                file=sys.stderr,
-            )
-            sys.exit(EXIT_INVALID_INPUT)
-        except OSError as e:
-            print(
-                colorize(f"Error: failed to read config file {path}: {e}", Colors.RED),
-                file=sys.stderr,
-            )
-            sys.exit(EXIT_INVALID_INPUT)
-    return {}
-
-
-def apply_config_defaults(args: argparse.Namespace, cfg: dict[str, Any]) -> None:
-    """Apply configuration options as fallback defaults to argparse Namespace."""
-
-    def _set_bool(name: str, key: str) -> None:
-        # Only apply if the attribute exists AND is still at its default (False)
-        if (
-            hasattr(args, name)
-            and getattr(args, name) is False
-            and isinstance(cfg.get(key), bool)
-        ):
-            setattr(args, name, cfg[key])
-
-    def _set_num(name: str, key: str) -> None:
-        # FIX: graceful_timeout default is now None; apply config only when not explicitly set
-        if hasattr(args, name) and cfg.get(key) is not None:
-            try:
-                current = getattr(args, name)
-                if name == "graceful_timeout" and current is None:
-                    setattr(args, name, float(cfg[key]))
-            except (ValueError, TypeError):
-                pass
-
-    _set_bool("yes", "yes")
-    _set_bool("dry_run", "dry_run")
-    _set_bool("json", "json")
-    _set_bool("debug", "debug")
-    _set_bool("force", "force")
-    _set_bool("bypass_safety", "bypass_safety")
-    _set_num("graceful_timeout", "graceful_timeout")
-
-    # Custom safety lists from config
-    args.protected_ports = cfg.get("protected_ports")
-    args.protected_processes = cfg.get("protected_processes")
-
-    if hasattr(args, "docker_action") and getattr(args, "docker_action", None) is None:
-        v = cfg.get("docker_action")
-        if v in ("stop", "restart", "rm"):
-            args.docker_action = v
-
-
-def _resolve_timeout(args: argparse.Namespace) -> float:
-    """Return graceful_timeout, falling back to 3.0 if not set."""
-    t = getattr(args, "graceful_timeout", None)
-    return float(t) if t is not None else 3.0
-
-
-def validate_port(port: int) -> None:
-    """Validate port constraints, raising InvalidPortError on failure."""
-    if not (1 <= port <= 65535):
-        raise InvalidPortError(f"Port {port} is not valid. Must be 1-65535.")
-
-
-def parse_port_range(port_range: str, max_ports: int = 1000) -> list[int]:
-    """Parse port range strings (e.g. 8080 or 3000-3010)."""
-    try:
-        if "-" in port_range:
-            start_s, end_s = port_range.split("-", 1)
-            start = int(start_s.strip())
-            end = int(end_s.strip())
-            if start > end:
-                raise InvalidPortError(f"Invalid range {port_range}: start > end")
-            total = end - start + 1
-            if total > max_ports:
-                raise InvalidPortError(
-                    f"Range too large ({total} ports). Maximum {max_ports} allowed."
-                )
-            for p in (start, end):
-                validate_port(p)
-            return list(range(start, end + 1))
-        else:
-            port = int(port_range.strip())
-            validate_port(port)
-            return [port]
-    except ValueError:
-        raise InvalidPortError(f"Invalid port or range format: {port_range}")
-
-
-JSON_SCHEMA_VERSION = 1
-
-
-def _json_out(command: str, data: dict) -> str:
-    """Return a stable, versioned JSON envelope for --json output.
-
-    Schema:  {"schema_version": 1, "command": "<subcommand>", "data": {...}}
-    All --json outputs pass through here so downstream scripts can key on
-    schema_version to detect breaking changes.
-    """
-    return json.dumps(
-        {"schema_version": JSON_SCHEMA_VERSION, "command": command, "data": data},
-        indent=2,
-    )
-
-
-def _resolve_ports_for_args(args: argparse.Namespace) -> list[int]:
-    """Helper to resolve a list of ports for the command, supporting --profile."""
-    profile_name = getattr(args, "profile", None)
-    if profile_name:
-        cfg = load_config(
-            getattr(args, "config", None), debug=getattr(args, "debug", False)
-        )
-        profiles = load_profiles(cfg)
-        resolved = resolve_profile(profile_name, profiles)
-        if resolved is None:
-            raise KPortError(f"Profile '{profile_name}' not found in configuration")
-        return resolved
-
-    port = getattr(args, "port", None)
-    if port is not None:
-        return [port]
-    return []
-
-
-def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -> int:
-    """Implement subcommands defined in the product specification."""
-    debug = bool(getattr(args, "debug", False))
-
-    if args.command == "docker":
-        extra = getattr(args, "extra", []) or []
-        # Separate numeric args (port filters) from non-numeric (unknown subcommands).
-        port_filters: list[int] = []
-        unknown_args: list[str] = []
-        for token in extra:
-            try:
-                port_filters.append(int(token))
-            except ValueError:
-                unknown_args.append(token)
-
-        if unknown_args:
-            print(
-                colorize(
-                    f"Note: 'kport docker' has no subcommands. Ignoring: {' '.join(unknown_args)}",
-                    Colors.YELLOW,
-                ),
-                file=sys.stderr,
-            )
-
-        maps = list_docker_mappings(debug=debug)
-        if port_filters:
-            maps = [m for m in maps if m.host_port in port_filters]
-            if not maps and not args.json:
-                ports_str = ", ".join(str(p) for p in port_filters)
-                print(
-                    colorize(
-                        f"No Docker-published ports found matching port(s): {ports_str}",
-                        Colors.YELLOW,
-                    )
-                )
-
-        if args.json:
-            print(_json_out("docker", [asdict(m) for m in maps]))
-        else:
-            print_table_docker(maps)
-        return EXIT_OK
-
-    if args.command == "list":
-        local = inspector.list_listening(proto=getattr(args, "proto", "tcp"))
-        docker_maps = list_docker_mappings(debug=debug)
-        if args.json:
-            print(
-                _json_out(
-                    "list",
-                    {
-                        "local": [asdict(b) for b in local],
-                        "docker": [asdict(m) for m in docker_maps],
-                    },
-                )
-            )
-        else:
-            print_table_list_product(local, docker_maps)
-        return EXIT_OK
-
-    if args.command == "inspect":
-        ports = _resolve_ports_for_args(args)
-        if not ports:
-            print(
-                colorize("Error: inspect requires a port or a --profile", Colors.RED),
-                file=sys.stderr,
-            )
-            return EXIT_INVALID_INPUT
-
-        results = []
-        exit_code = EXIT_PORT_FREE
-        for port in ports:
-            validate_port(port)
-            local_bindings = inspector.find_bindings_on_port(
-                port, proto=getattr(args, "proto", "tcp")
-            )
-            docker_hits = docker_mappings_for_host_port(port, debug=debug)
-            pids = inspector.find_pids_on_port(
-                port, proto=getattr(args, "proto", "tcp")
-            )
-
-            if docker_hits:
-                m = docker_hits[0]
-                payload = {
-                    "port": port,
-                    "type": "docker",
-                    "container": m.container_name,
-                    "image": m.image,
-                    "host_port": m.host_port,
-                    "container_port": m.container_port,
-                    "status": m.status,
-                }
-                results.append(payload)
-                if not args.json:
-                    print(colorize(f"Port: {port}", Colors.CYAN + Colors.BOLD))
-                    print("Type: Docker Container")
-                    print(f"Container: {m.container_name}")
-                    print(f"Image: {m.image}")
-                    print(f"Host Port: {m.host_port}")
-                    print(f"Container Port: {m.container_port}")
-                    print(f"Status: {m.status}")
-                    print()
-                exit_code = EXIT_PORT_DOCKER
-            elif not pids and not local_bindings:
-                payload = {"port": port, "type": "free"}
-                results.append(payload)
-                if not args.json:
-                    print(colorize(f"Port {port} is free", Colors.GREEN))
-                    print()
-            elif not pids and local_bindings:
-                msg = "Port is in use, but the owning PID is not visible (try running with sudo/admin)."
-                payload = {
-                    "port": port,
-                    "type": "local-unknown",
-                    "message": msg,
-                    "bindings": [asdict(b) for b in local_bindings],
-                }
-                results.append(payload)
-                if not args.json:
-                    print(colorize(f"Port: {port}", Colors.CYAN + Colors.BOLD))
-                    print("Type: Local Process")
-                    print(colorize(msg, Colors.YELLOW))
-                    print()
-                if exit_code not in (EXIT_PORT_DOCKER, EXIT_OK):
-                    exit_code = EXIT_OK
-            else:
-                info_list = []
-                for pid in pids:
-                    info = inspector.get_process_info(pid)
-                    info_list.append(
-                        {"pid": pid, "process": asdict(info) if info else None}
-                    )
-                payload = {"port": port, "type": "local", "pids": info_list}
-                results.append(payload)
-                if not args.json:
-                    print(colorize(f"Port: {port}", Colors.CYAN + Colors.BOLD))
-                    print("Type: Local Process")
-                    for entry in info_list:
-                        pid = entry["pid"]
-                        proc = entry["process"]
-                        if proc:
-                            print(f"PID: {pid}")
-                            print(f"Process: {proc.get('name')}")
-                            if proc.get("cmdline"):
-                                print(f"Command: {' '.join(proc['cmdline'])}")
-                        else:
-                            print(f"PID: {pid} (info unavailable)")
-                    print()
-                if exit_code != EXIT_PORT_DOCKER:
-                    exit_code = EXIT_OK
-
-        if args.json:
-            if len(ports) == 1:
-                print(_json_out("inspect", results[0]))
-            else:
-                print(_json_out("inspect", {"ports": results}))
-        return exit_code
-
-    if args.command == "explain":
-        validate_port(args.port)
-        # Check Docker FIRST — Docker awareness does not require elevated privileges.
-        docker_hits = docker_mappings_for_host_port(args.port, debug=debug)
-        if docker_hits:
-            m = docker_hits[0]
-            if args.json:
-                print(
-                    _json_out(
-                        "explain",
-                        {
-                            "port": args.port,
-                            "blocked": True,
-                            "because": [
-                                f"It is mapped to Docker container '{m.container_name}'",
-                                f"Docker maps host port {m.host_port} \u2192 container port {m.container_port}",
-                                "The process runs inside an isolated network namespace",
-                            ],
-                            "suggested_actions": [
-                                {
-                                    "action": "docker_stop",
-                                    "port": args.port,
-                                    "container": m.container_name,
-                                    "requires_confirmation": True,
-                                    "safe": True,
-                                    "command": f"kport kill {args.port} --docker-action stop --yes",
-                                },
-                                {
-                                    "action": "docker_restart",
-                                    "port": args.port,
-                                    "container": m.container_name,
-                                    "requires_confirmation": True,
-                                    "safe": True,
-                                    "command": f"kport kill {args.port} --docker-action restart --yes",
-                                },
-                            ],
-                        },
-                    )
-                )
-            else:
-                print(
-                    colorize(
-                        f"Port {args.port} is unavailable because:",
-                        Colors.YELLOW + Colors.BOLD,
-                    )
-                )
-                print(f'- It is mapped to Docker container "{m.container_name}"')
-                print(
-                    f"- Docker maps host port {m.host_port} \u2192 container port {m.container_port}"
-                )
-                print("- The process runs inside an isolated network namespace")
-            return EXIT_PORT_DOCKER
-
-        local_bindings = inspector.find_bindings_on_port(
-            args.port, proto=getattr(args, "proto", "tcp")
-        )
-        pids = inspector.find_pids_on_port(
-            args.port, proto=getattr(args, "proto", "tcp")
-        )
-
-        if not pids and not local_bindings:
-            # Before declaring free: check raw /proc/net/tcp for a socket on this port.
-            # This catches the snap/container case where:
-            #   - docker_hits is empty (Docker daemon unreachable from snap sandbox)
-            #   - local_bindings is empty (owning PID not visible without elevation)
-            #   - but a listening socket IS present at the kernel level
-            _raw_occupied = False
-            import platform as _platform
-
-            if _platform.system() == "Linux":
-                try:
-                    from .inspectors.system_impl import _parse_proc_net_file
-
-                    for fname, fam in [
-                        ("/proc/net/tcp", "IPv4"),
-                        ("/proc/net/tcp6", "IPv6"),
-                    ]:
-                        for _ip, _port, _inode in _parse_proc_net_file(fname, fam):
-                            if _port == args.port:
-                                _raw_occupied = True
-                                break
-                        if _raw_occupied:
-                            break
-                except (OSError, ValueError, IndexError):
-                    pass
-
-            if _raw_occupied:
-                # Port IS occupied at kernel level but PID/process is not visible.
-                if args.json:
-                    print(
-                        _json_out(
-                            "explain",
-                            {
-                                "port": args.port,
-                                "blocked": True,
-                                "type": "local-unknown",
-                                "message": "A local process is listening, but the owning PID is not visible",
-                                "because": [
-                                    "A local process is listening, but the owning PID is not visible",
-                                    "This is commonly due to missing privileges; try running with sudo",
-                                ],
-                                "suggested_actions": [
-                                    {
-                                        "action": "rerun_as_admin",
-                                        "port": args.port,
-                                        "requires_confirmation": False,
-                                        "safe": True,
-                                        "note": "Re-run kport with administrator/sudo privileges to see the owning PID",
-                                    },
-                                ],
-                            },
-                        )
-                    )
-                else:
-                    print(
-                        colorize(
-                            f"Port {args.port} is unavailable because:",
-                            Colors.YELLOW + Colors.BOLD,
-                        )
-                    )
-                    print(
-                        "- A local process is listening, but the owning PID is not visible"
-                    )
-                    print(
-                        "- This is commonly due to missing privileges; try running with sudo"
-                    )
-                return EXIT_OK
-
-            if args.json:
-                print(
-                    _json_out(
-                        "explain",
-                        {
-                            "port": args.port,
-                            "blocked": False,
-                            "suggested_actions": [
-                                {
-                                    "action": "bind",
-                                    "port": args.port,
-                                    "requires_confirmation": False,
-                                    "safe": True,
-                                    "note": "Port is free \u2014 safe to bind",
-                                },
-                            ],
-                        },
-                    )
-                )
-            else:
-                print(colorize(f"Port {args.port} is free", Colors.GREEN))
-            return EXIT_PORT_FREE
-
-        if not pids and local_bindings:
-            if args.json:
-                print(
-                    _json_out(
-                        "explain",
-                        {
-                            "port": args.port,
-                            "blocked": True,
-                            "type": "local-unknown",
-                            "message": "Owning PID not visible (try sudo/admin)",
-                            "bindings": [asdict(b) for b in local_bindings],
-                            "suggested_actions": [
-                                {
-                                    "action": "rerun_as_admin",
-                                    "port": args.port,
-                                    "requires_confirmation": False,
-                                    "safe": True,
-                                    "note": "Re-run kport with administrator/sudo privileges to see the owning PID",
-                                },
-                            ],
-                        },
-                    )
-                )
-            else:
-                print(
-                    colorize(
-                        f"Port {args.port} is unavailable because:",
-                        Colors.YELLOW + Colors.BOLD,
-                    )
-                )
-                print(
-                    "- A local process is listening, but the owning PID is not visible"
-                )
-                print(
-                    "- This is commonly due to missing privileges; try running with sudo"
-                )
-            return EXIT_OK
-
-        # Local process explanation
-        infos = []
-        managed_by_list = []
-        for pid in pids:
-            info = inspector.get_process_info(pid)
-            pm_info = detect_process_manager(pid)
-            proc_dict = asdict(info) if info else None
-            mb = pm_info["managed_by"] if pm_info else None
-            if mb:
-                managed_by_list.append(mb)
-                if proc_dict:
-                    proc_dict["managed_by"] = mb
-            infos.append({"pid": pid, "process": proc_dict, "managed_by": mb})
-
-        # Build safe suggested_actions (protected-port-aware)
-        safe_kill = not any(
-            p in DEFAULT_PROTECTED_PORTS for p in [args.port]
-        ) and not any(
-            (
-                inspector.get_process_info(p)
-                and inspector.get_process_info(p).name.lower().split(" (")[0]
-                in DEFAULT_PROTECTED_PROCESS_NAMES
-            )
-            for p in pids
-        )
-        if args.json:
-            print(
-                _json_out(
-                    "explain",
-                    {
-                        "port": args.port,
-                        "blocked": True,
-                        "type": "local",
-                        "managed_by": managed_by_list[0]
-                        if len(managed_by_list) == 1
-                        else (managed_by_list if managed_by_list else None),
-                        "pids": infos,
-                        "suggested_actions": [
-                            {
-                                "action": "kill",
-                                "port": args.port,
-                                "requires_confirmation": True,
-                                "safe": safe_kill,
-                                "command": f"kport kill {args.port} --yes",
-                                "note": None
-                                if safe_kill
-                                else "Port or process is protected — pass --bypass-safety to override",
-                            },
-                            {
-                                "action": "dry_run",
-                                "port": args.port,
-                                "requires_confirmation": False,
-                                "safe": True,
-                                "command": f"kport kill {args.port} --dry-run --json",
-                                "note": "Preview what would happen without executing",
-                            },
-                        ],
-                    },
-                )
-            )
-        else:
-            print(
-                colorize(
-                    f"Port {args.port} is unavailable because:",
-                    Colors.YELLOW + Colors.BOLD,
-                )
-            )
-            for entry in infos:
-                proc = entry["process"]
-                mb = entry.get("managed_by")
-                mb_str = f" (managed by {mb})" if mb else ""
-                if proc:
-                    print(
-                        f"- PID {entry['pid']} ({proc.get('name')}) is listening{mb_str}"
-                    )
-                else:
-                    print(f"- PID {entry['pid']} is listening{mb_str}")
-                if mb:
-                    pm_info = detect_process_manager(entry["pid"])
-                    if pm_info and pm_info.get("warning"):
-                        print(colorize(f"  ⚠ {pm_info['warning']}", Colors.YELLOW))
-        return EXIT_OK
-
-    if args.command == "kill":
-        ports = _resolve_ports_for_args(args)
-        if not ports:
-            print(
-                colorize("Error: kill requires a port or a --profile", Colors.RED),
-                file=sys.stderr,
-            )
-            return EXIT_INVALID_INPUT
-
-        # For text output, confirm once if not yes
-        if not args.json and not args.yes:
-            # We want to confirm proceeding with the action plan for all ports.
-            pids_to_kill_all = []
-            docker_hits_all = []
-            for port in ports:
-                pids = inspector.find_pids_on_port(
-                    port, proto=getattr(args, "proto", "tcp")
-                )
-                pids_to_kill_all.extend(pids)
-                dh = docker_mappings_for_host_port(port, debug=debug)
-                if dh:
-                    docker_hits_all.append(dh[0])
-
-            # Print Action Plan
-            print(colorize("Action plan:", Colors.CYAN))
-            if pids_to_kill_all:
-                print(
-                    colorize(
-                        f"1. Terminate local PIDs: {', '.join(map(str, set(pids_to_kill_all)))}",
-                        Colors.CYAN,
-                    )
-                )
-            if docker_hits_all:
-                action = getattr(args, "docker_action", None) or "stop"
-                containers_str = ", ".join(m.container_name for m in docker_hits_all)
-                print(
-                    colorize(
-                        f"2. Perform Docker action '{action}' on containers: {containers_str}",
-                        Colors.CYAN,
-                    )
-                )
-
-            if not confirm_prompt("Proceed?", assume_yes=args.yes):
-                print(colorize("Operation cancelled.", Colors.YELLOW))
-                return EXIT_GENERAL_ERROR
-
-        results = []
-        overall_ok = True
-        exit_codes = []
-        for port in ports:
-            validate_port(port)
-            pids = inspector.find_pids_on_port(
-                port, proto=getattr(args, "proto", "tcp")
-            )
-
-            # Check safety policy
-            safe, safety_msg = check_safety_policy(port, pids, args, inspector)
-            if not safe:
-                if args.json:
-                    results.append(
-                        {"port": port, "success": False, "message": safety_msg}
-                    )
-                else:
-                    print(
-                        colorize(f"Port {port}: {safety_msg}", Colors.RED),
-                        file=sys.stderr,
-                    )
-                overall_ok = False
-                exit_codes.append(EXIT_PERMISSION)
-                continue
-
-            local_bindings = inspector.find_bindings_on_port(
-                port, proto=getattr(args, "proto", "tcp")
-            )
-            docker_hits = docker_mappings_for_host_port(port, debug=debug)
-            if docker_hits:
-                m = docker_hits[0]
-                action = getattr(args, "docker_action", None)
-                if not action and not args.json:
-                    print(
-                        colorize(
-                            f"Port {port} belongs to Docker container: {m.container_name}",
-                            Colors.YELLOW + Colors.BOLD,
-                        )
-                    )
-                    action = choose_docker_action(assume_yes=args.yes)
-                if not action:
-                    if args.json:
-                        results.append(
-                            {
-                                "port": port,
-                                "type": "docker",
-                                "container": m.container_name,
-                                "container_id": m.container_id,
-                                "available_actions": ["stop", "restart", "rm"],
-                                "performed": None,
-                                "message": "No action selected",
-                            }
-                        )
-                    else:
-                        print(colorize("Operation cancelled.", Colors.YELLOW))
-                    overall_ok = False
-                    exit_codes.append(EXIT_GENERAL_ERROR)
-                    continue
-
-                if args.json and not args.yes and not args.dry_run:
-                    results.append(
-                        {
-                            "port": port,
-                            "type": "docker",
-                            "container": m.container_name,
-                            "container_id": m.container_id,
-                            "requested_action": action,
-                            "performed": False,
-                            "message": "Refusing to act without --yes in JSON mode",
-                        }
-                    )
-                    overall_ok = False
-                    exit_codes.append(EXIT_GENERAL_ERROR)
-                    continue
-
-                if (
-                    action == "rm"
-                    and not args.dry_run
-                    and not confirm_docker_rm(
-                        m.container_name,
-                        m.container_id,
-                        assume_yes=args.yes,
-                        force=args.force,
-                        image=getattr(m, "image", ""),
-                        host_port=getattr(m, "host_port", port),
-                        container_port=getattr(m, "container_port", None),
-                    )
-                ):
-                        if args.json:
-                            results.append(
-                                {
-                                    "port": port,
-                                    "type": "docker",
-                                    "container": m.container_name,
-                                    "container_id": m.container_id,
-                                    "action": "rm",
-                                    "ok": False,
-                                    "message": "Removing a Docker container is irreversible. Use --force in addition to --yes to bypass interactive confirmation.",
-                                }
-                            )
-                        overall_ok = False
-                        exit_codes.append(EXIT_PERMISSION)
-                        continue
-
-                ok, msg = docker_action_on_container(
-                    m.container_id, action=action, dry_run=args.dry_run, debug=debug
-                )
-                # Audit log for docker action
-                audit.log_docker_action(
-                    m.container_id,
-                    m.container_name,
-                    action,
-                    dry_run=args.dry_run,
-                    success=ok,
-                    message=msg,
-                )
-                if args.json:
-                    results.append(
-                        {
-                            "port": port,
-                            "type": "docker",
-                            "container": m.container_name,
-                            "container_id": m.container_id,
-                            "action": action,
-                            "ok": ok,
-                            "message": msg,
-                        }
-                    )
-                else:
-                    if ok:
-                        print(colorize(f"✓ Port {port}: {msg}", Colors.GREEN))
-                    else:
-                        print(colorize(f"✗ Port {port}: {msg}", Colors.RED))
-                if not ok:
-                    overall_ok = False
-                exit_codes.append(EXIT_OK if ok else EXIT_GENERAL_ERROR)
-                continue
-
-            # Local process kill
-            if not pids and not local_bindings:
-                if args.json:
-                    results.append(
-                        {
-                            "port": port,
-                            "killed": [],
-                            "failed": [],
-                            "message": "Port free",
-                        }
-                    )
-                else:
-                    print(colorize(f"Port {port} is free", Colors.GREEN))
-                exit_codes.append(EXIT_PORT_FREE)
-                continue
-
-            if not pids and local_bindings:
-                msg = "Port is in use but PID is not visible; cannot kill safely without PID. Try sudo/admin."
-                if args.json:
-                    results.append(
-                        {
-                            "port": port,
-                            "ok": False,
-                            "message": msg,
-                            "bindings": [asdict(b) for b in local_bindings],
-                        }
-                    )
-                else:
-                    print(colorize(f"Port {port}: {msg}", Colors.RED))
-                overall_ok = False
-                exit_codes.append(EXIT_PERMISSION)
-                continue
-
-            ok, msg = inspector.kill_port(
-                port,
-                graceful_timeout=_resolve_timeout(args),
-                force=args.force,
-                dry_run=args.dry_run,
-                debug=debug,
-                assume_yes=args.yes,
-                kill_tree=getattr(args, "kill_tree", False),
-                proto=getattr(args, "proto", "tcp"),
-            )
-
-            # Audit log
-            audit.log_kill_port(
-                port, pids, dry_run=args.dry_run, success=ok, message=msg
-            )
-
-            if args.json:
-                results.append(
-                    {
-                        "port": port,
-                        "success": ok,
-                        "message": msg,
-                        "pids_targeted": pids,
-                        "dry_run": args.dry_run,
-                    }
-                )
-            else:
-                if ok:
-                    print(colorize(f"✓ Port {port}: {msg}", Colors.GREEN))
-                else:
-                    print(colorize(f"✗ Port {port}: {msg}", Colors.RED))
-            if not ok:
-                overall_ok = False
-            exit_codes.append(EXIT_OK if ok else EXIT_GENERAL_ERROR)
-
-        if getattr(args, "wait_for_exit", None) is not None and not args.dry_run:
-            timeout = args.wait_for_exit
-            wait_results = {}
-            for i, port in enumerate(ports):
-                if exit_codes[i] in (EXIT_OK, EXIT_PORT_FREE):
-                    if not args.json:
-                        print(
-                            colorize(
-                                f"⌛ Waiting for port {port} to be free (timeout {timeout}s)...",
-                                Colors.WHITE,
-                            )
-                        )
-                    wait_ok = _poll_until_free(port, timeout, inspector)
-                    wait_results[port] = wait_ok
-                    if not wait_ok:
-                        overall_ok = False
-                        exit_codes[i] = EXIT_GENERAL_ERROR
-                        if not args.json:
-                            print(
-                                colorize(
-                                    f"⏱ Process did not exit within {timeout}s",
-                                    Colors.RED,
-                                ),
-                                file=sys.stderr,
-                            )
-                    else:
-                        if not args.json:
-                            print(colorize(f"✓ Port {port} is now free.", Colors.GREEN))
-            for r in results:
-                p = r.get("port")
-                if p in wait_results:
-                    r["wait_for_exit_ok"] = wait_results[p]
-
-        if args.json:
-            if len(ports) == 1:
-                print(_json_out("kill", results[0]))
-            else:
-                print(_json_out("kill", {"ports": results}))
-
-        if len(ports) == 1:
-            return exit_codes[0]
-        return EXIT_OK if overall_ok else EXIT_GENERAL_ERROR
-
-    if args.command == "kill-process":
-        pname = args.name
-        pids = inspector.find_pids_by_name(pname, exact=args.exact)
-        if not pids:
-            if args.json:
-                print(_json_out("kill-process", {"name": pname, "pids": []}))
-            else:
-                print(colorize(f"✗ No processes found matching '{pname}'", Colors.RED))
-            return EXIT_OK
-
-        # Check safety policy
-        safe, safety_msg = check_safety_policy(None, pids, args, inspector)
-        if not safe:
-            if args.json:
-                print(
-                    _json_out(
-                        "kill-process",
-                        {"name": pname, "success": False, "message": safety_msg},
-                    )
-                )
-            else:
-                print(colorize(safety_msg, Colors.RED), file=sys.stderr)
-            return EXIT_PERMISSION
-
-        if not args.json and not confirm_prompt(
-            f"Proceed to terminate {len(pids)} process(es)?", assume_yes=args.yes
-        ):
-            print(colorize("Operation cancelled.", Colors.YELLOW))
-            return EXIT_GENERAL_ERROR
-
-        killed = []
-        failed = []
-        for pid in pids:
-            if getattr(args, "kill_tree", False):
-                ok, msg = inspector.kill_process_tree(
-                    pid,
-                    graceful_timeout=_resolve_timeout(args),
-                    force=args.force,
-                    dry_run=args.dry_run,
-                    assume_yes=args.yes,
-                )
-            else:
-                ok, msg = inspector.kill_pid(
-                    pid,
-                    graceful_timeout=_resolve_timeout(args),
-                    force=args.force,
-                    dry_run=args.dry_run,
-                    assume_yes=args.yes,
-                )
-
-            # Audit log
-            audit.log_kill_pid(
-                pid, pname, dry_run=args.dry_run, success=ok, message=msg
-            )
-
-            if ok:
-                killed.append({"pid": pid, "msg": msg})
-            else:
-                failed.append({"pid": pid, "msg": msg})
-
-        if args.json:
-            print(_json_out("kill-process", {"killed": killed, "failed": failed}))
-        else:
-            for k in killed:
-                print(colorize(f"✓ Killed PID {k['pid']} ({k['msg']})", Colors.GREEN))
-            for f in failed:
-                print(colorize(f"✗ Failed PID {f['pid']} ({f['msg']})", Colors.RED))
-
-        return EXIT_OK if not failed else EXIT_GENERAL_ERROR
-
-    if args.command == "conflicts":
-        docker_maps = list_docker_mappings(debug=debug)
-        conflicts = []
-        for m in docker_maps:
-            pids = inspector.find_pids_on_port(m.host_port)
-            non_docker_pids = []
-            for pid in pids:
-                info = inspector.get_process_info(pid)
-                pname = (info.name if info else "").lower()
-                if "docker-proxy" in pname or pname.startswith("docker"):
-                    continue
-                non_docker_pids.append(
-                    {"pid": pid, "process": asdict(info) if info else None}
-                )
-            if non_docker_pids:
-                conflicts.append(
-                    {
-                        "port": m.host_port,
-                        "docker": asdict(m),
-                        "local": non_docker_pids,
-                    }
-                )
-        if args.json:
-            print(_json_out("conflicts", conflicts))
-        else:
-            if not conflicts:
-                print(colorize("No port conflicts detected.", Colors.GREEN))
-            else:
-                print(
-                    colorize(
-                        "WARNING: Port conflict detected", Colors.YELLOW + Colors.BOLD
-                    )
-                )
-                for c in conflicts:
-                    print(f"\nPort: {c['port']}")
-                    print(f"- Docker container: {c['docker']['container_name']}")
-                    for lp in c["local"]:
-                        proc = lp.get("process") or {}
-                        print(f"- Local process: {proc.get('name') or 'Unknown'}")
-        return EXIT_OK
-
-    if args.command == "watch":
-        ports_to_watch: list[int] = []
-        # Support both single port (positional) and --ports / --range
-        single = getattr(args, "port", None)
-        multi = getattr(args, "ports", None)
-        rng = getattr(args, "range", None)
-        if multi:
-            for p in multi:
-                validate_port(p)
-                ports_to_watch.append(p)
-        elif rng:
-            ports_to_watch = parse_port_range(rng)
-        elif single is not None:
-            validate_port(single)
-            ports_to_watch = [single]
-        else:
-            print(
-                colorize(
-                    "Error: watch requires a port, --ports, or --range", Colors.RED
-                ),
-                file=sys.stderr,
-            )
-            return EXIT_INVALID_INPUT
-
-        interval = getattr(args, "interval", 1.0)
-        do_notify = getattr(args, "notify", False)
-
-        import time
-        from datetime import datetime, timezone
-
-        # Per-port state tracking
-        states: dict[int, dict[str, Any]] = {}
-
-        def get_port_state(port: int) -> dict[str, Any]:
-            local_bindings = inspector.find_bindings_on_port(port)
-            docker_hits = docker_mappings_for_host_port(port, debug=debug)
-            pids = inspector.find_pids_on_port(port)
-
-            if docker_hits:
-                m = docker_hits[0]
-                return {
-                    "type": "docker",
-                    "container": m.container_name,
-                    "image": m.image,
-                    "status": m.status,
-                    "host_port": m.host_port,
-                    "container_port": m.container_port,
-                }
-            elif pids:
-                procs = []
-                for pid in pids:
-                    info = inspector.get_process_info(pid)
-                    procs.append(info.name if info else "Unknown")
-                return {"type": "local", "pids": pids, "processes": procs}
-            elif local_bindings:
-                return {"type": "local-unknown", "message": "Owning PID not visible"}
-            else:
-                return {"type": "free"}
-
-        def describe_state(port: int, state: dict[str, Any]) -> str:
-            stype = state["type"]
-            if stype == "free":
-                return f"port {port}: FREE"
-            elif stype == "docker":
-                return (
-                    f"port {port}: DOCKER '{state['container']}' "
-                    f"({state['image']}, status={state['status']})"
-                )
-            elif stype == "local":
-                procs_str = ", ".join(
-                    f"{name} (PID {pid})"
-                    for pid, name in zip(state["pids"], state["processes"])
-                )
-                return f"port {port}: LOCAL {procs_str}"
-            elif stype == "local-unknown":
-                return f"port {port}: LOCAL (PID hidden)"
-            return f"port {port}: UNKNOWN"
-
-        def _states_differ(a: dict[str, Any], b: dict[str, Any]) -> bool:
-            """P6 fix: compare full state including process names, not just PIDs."""
-            if a["type"] != b["type"]:
-                return True
-            if a["type"] == "docker":
-                return a["container"] != b.get("container") or a["status"] != b.get(
-                    "status"
-                )
-            if a["type"] == "local":
-                return set(a["pids"]) != set(b.get("pids", [])) or sorted(
-                    a["processes"]
-                ) != sorted(b.get("processes", []))
-            return False
-
-        # Initialise state for each watched port
-        for port in ports_to_watch:
-            st = get_port_state(port)
-            states[port] = st
-            ts = datetime.now(timezone.utc)
-            if args.json:
-                # Streaming JSON: flat object per event, consistent with change events.
-                # "event": "initial" allows consumers to skip or process separately.
-                st_out = dict(st)
-                st_out["event"] = "initial"
-                st_out["port"] = port
-                st_out["timestamp"] = ts.isoformat()
-                print(json.dumps(st_out))
-                sys.stdout.flush()
-            else:
-                desc = describe_state(port, st)
-                print(
-                    colorize(
-                        f"[{ts.strftime('%Y-%m-%d %H:%M:%S')}] Initial: {desc}",
-                        Colors.WHITE,
-                    )
-                )
-
-        until_mode = getattr(args, "until", None)
-        timeout_sec = getattr(args, "timeout", None)
-
-        def _is_until_satisfied(current_states: dict[int, dict[str, Any]]) -> bool:
-            if not until_mode:
-                return False
-            if until_mode == "free":
-                return all(st["type"] == "free" for st in current_states.values())
-            elif until_mode == "occupied":
-                return all(st["type"] != "free" for st in current_states.values())
-            return False
-
-        # Initial check for --until
-        if until_mode and _is_until_satisfied(states):
-            if not args.json:
-                print(
-                    colorize(
-                        f"✓ Port state condition '{until_mode}' satisfied.",
-                        Colors.GREEN + Colors.BOLD,
-                    )
-                )
-            return EXIT_OK
-
-        if not args.json:
-            ports_str = ", ".join(str(p) for p in ports_to_watch)
-            print(
-                colorize(
-                    f"\n\U0001f440 Watching port(s) {ports_str} (interval={interval}s). "
-                    "Press Ctrl+C to stop.",
-                    Colors.CYAN + Colors.BOLD,
-                )
-            )
-
-        start_time = time.time()
-        try:
-            while True:
-                if (
-                    timeout_sec is not None
-                    and (time.time() - start_time) >= timeout_sec
-                ):
-                    if args.json:
-                        print(
-                            json.dumps(
-                                {
-                                    "command": "watch",
-                                    "event": "timeout",
-                                    "success": False,
-                                    "message": f"Timeout of {timeout_sec}s reached before --until '{until_mode}' condition satisfied",
-                                }
-                            )
-                        )
-                    else:
-                        print(
-                            colorize(
-                                f"⏱ Timeout of {timeout_sec}s reached before --until '{until_mode}' condition satisfied.",
-                                Colors.RED,
-                            ),
-                            file=sys.stderr,
-                        )
-                    return EXIT_GENERAL_ERROR
-
-                time.sleep(interval)
-                for port in ports_to_watch:
-                    current = get_port_state(port)
-                    last = states[port]
-
-                    if _states_differ(current, last):
-                        ts = datetime.now(timezone.utc)
-                        states[port] = current
-                        desc = describe_state(port, current)
-
-                        if args.json:
-                            out = dict(current)
-                            out["event"] = "change"
-                            out["port"] = port
-                            out["timestamp"] = ts.isoformat()
-                            print(json.dumps(out))
-                            sys.stdout.flush()
-
-                        else:
-                            color = (
-                                Colors.GREEN
-                                if current["type"] == "free"
-                                else Colors.YELLOW
-                            )
-                            print(
-                                colorize(
-                                    f"[{ts.strftime('%Y-%m-%d %H:%M:%S')}] \U0001f501 {desc}",
-                                    color + Colors.BOLD,
-                                )
-                            )
-
-                        if do_notify:
-                            _desktop_notify(
-                                "kport — port state change",
-                                desc,
-                            )
-
-                if until_mode and _is_until_satisfied(states):
-                    if not args.json:
-                        print(
-                            colorize(
-                                f"✓ Port state condition '{until_mode}' satisfied.",
-                                Colors.GREEN + Colors.BOLD,
-                            )
-                        )
-                    return EXIT_OK
-
-        except KeyboardInterrupt:
-            if not args.json:
-                print(colorize("\nStopping watch mode.", Colors.CYAN))
-        return EXIT_OK
-
-    if args.command == "mcp":
-        try:
-            from .mcp_server import run_mcp_server
-
-            run_mcp_server()
-            return EXIT_OK
-        except ImportError:
-            print(
-                colorize(
-                    "Error: MCP server module not available. Install mcp extra: pip install kport[mcp]",
-                    Colors.RED,
-                ),
-                file=sys.stderr,
-            )
-            return EXIT_GENERAL_ERROR
-        except Exception as e:  # noqa: BLE001 - top-level MCP server error handler
-            print(colorize(f"MCP server error: {e}", Colors.RED), file=sys.stderr)
-            return EXIT_GENERAL_ERROR
-
-    if args.command == "completion":
-        shell = getattr(args, "shell", None) or "bash"
-        _print_completion(shell)
-        return EXIT_OK
-
-    # Unrecognised subcommand — give a useful message instead of silent failure
-    print(
-        colorize(f"Error: unknown subcommand '{args.command}'", Colors.RED),
-        file=sys.stderr,
-    )
-    print("Run 'kport --help' for usage.", file=sys.stderr)
-    return EXIT_INVALID_INPUT
-
-
-def _print_completion(shell: str) -> None:
-    if shell == "bash":
-        print("""# bash completion for kport
-_kport_completion() {
-    local cur prev opts
-    COMPREPLY=()
-    cur="${COMP_WORDS[COMP_CWORD]}"
-    prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="inspect explain kill kill-process list docker conflicts watch mcp completion --json --dry-run --yes --debug --config --bypass-safety --version --wait-for-exit --proto"
-    case "${prev}" in
-        inspect|explain|watch|kill)
-            return 0
-            ;;
-        kill-process|--inspect-process|-ip|-kp)
-            return 0
-            ;;
-        *)
-            ;;
-    esac
-    COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
-    return 0
-}
-complete -F _kport_completion kport
-""")
-    elif shell == "zsh":
-        print("""# zsh completion for kport
-#compdef kport
-
-_kport() {
-    local line
-    _arguments -C \\
-        '--json[Output machine-readable JSON]' \\
-        '--dry-run[Show actions without executing]' \\
-        '(-y --yes)'{-y,--yes}'[Skip confirmation prompts]' \\
-        '--debug[Verbose internal logs]' \\
-        '--config[Path to JSON config file]' \\
-        '--bypass-safety[Bypass safety shields on protected ports/processes]' \\
-        '--wait-for-exit[Wait for port to be free after killing (seconds)]' \\
-        '--proto[Protocol type tcp|udp|both]' \\
-        '(-v --version)'{-v,--version}'[Show version]' \\
-        '1: :->cmds' \\
-        '*:: :->args'
-
-    case $state in
-        cmds)
-            _values "subcommand" \\
-                'inspect[Inspect a port (docker-aware)]' \\
-                'explain[Explain why a port is blocked]' \\
-                'kill[Safely free a port (docker-aware)]' \\
-                'kill-process[Kill processes by name]' \\
-                'list[List active ports (local + docker)]' \\
-                'docker[List Docker-published ports]' \\
-                'conflicts[Detect docker/local port conflicts]' \\
-                'watch[Live monitoring of port ownership]' \\
-                'mcp[Start the stdio Model Context Protocol (MCP) server]' \\
-                'completion[Generate shell autocompletion]'
-            ;;
-    esac
-}
-""")
-    elif shell == "fish":
-        print("""# fish completion for kport
-complete -c kport -f
-complete -c kport -a "inspect explain kill kill-process list docker conflicts watch mcp completion"
-complete -c kport -s y -l yes -d "Skip confirmation prompts"
-complete -c kport -l json -d "Output machine-readable JSON"
-complete -c kport -l dry-run -d "Show actions without executing"
-complete -c kport -l debug -d "Verbose internal logs"
-complete -c kport -l config -d "Path to JSON config file"
-complete -c kport -l bypass-safety -d "Bypass safety shields on protected ports/processes"
-complete -c kport -l wait-for-exit -d "Wait for port to be free after killing (seconds)"
-complete -c kport -l proto -r -f -a "tcp udp both" -d "Protocol type tcp|udp|both"
-complete -c kport -s v -l version -d "Show version"
-""")
-    elif shell == "powershell":
-        print("""# powershell completion for kport
-Register-ArgumentCompleter -Native -CommandName kport -ScriptBlock {
-    param($wordToComplete, $commandAst, $cursorPosition)
-    $opts = @('inspect', 'explain', 'kill', 'kill-process', 'list', 'docker', 'conflicts', 'watch', 'mcp', 'completion', '--json', '--dry-run', '--yes', '--debug', '--config', '--bypass-safety', '--version', '--wait-for-exit', '--proto')
-    $opts | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
-        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
-    }
-}
-""")
-    else:
-        print(f"Error: unsupported shell '{shell}'", file=sys.stderr)
-
-
 def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
+    warn_if_path_missing()
     parser = _QuietParser(
         description="kport - Cross-platform port inspector and killer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1702,6 +232,13 @@ Examples:
         action="store_true",
         help="Start the MCP JSON-RPC server on stdio (alias for 'kport mcp')",
     )
+    parser.add_argument(
+        "-p",
+        "--pid",
+        type=int,
+        metavar="PID",
+        help="Specify process ID (PID) for inspection or killing",
+    )
 
     # FIX: pass parser_class=_QuietParser so ALL subparsers inherit quiet error formatting
     sub = parser.add_subparsers(dest="command", parser_class=_QuietParser)
@@ -1742,11 +279,34 @@ Examples:
     sp_inspect.add_argument(
         "--profile", type=str, help="Named port profile from config"
     )
+    sp_inspect.add_argument(
+        "-p",
+        "--pid",
+        type=int,
+        metavar="PID",
+        help="Process ID to inspect",
+    )
 
     sp_explain = sub.add_parser(
         "explain", parents=[parent_parser], help="Explain why a port is blocked"
     )
     sp_explain.add_argument("port", type=int)
+
+    sp_stop_service = sub.add_parser(
+        "stop-service", parents=[parent_parser], help="Cleanly stop the service manager controlling a port"
+    )
+    sp_stop_service.add_argument("port", type=int)
+    sp_stop_service.add_argument(
+        "--force", action="store_true", help="Escalate to process kill if service stop fails or port remains blocked"
+    )
+    sp_stop_service.add_argument(
+        "--timeout", type=float, default=30.0, help="Command timeout in seconds"
+    )
+
+    sp_diagnose = sub.add_parser(
+        "diagnose", parents=[parent_parser], help="Structured analysis and fix recommendations for a port"
+    )
+    sp_diagnose.add_argument("port", type=int)
 
     sp_kill = sub.add_parser(
         "kill", parents=[parent_parser], help="Safely free a port (docker-aware)"
@@ -1772,6 +332,13 @@ Examples:
         "--kill-tree",
         action="store_true",
         help="Kill the process and all of its descendants",
+    )
+    sp_kill.add_argument(
+        "-p",
+        "--pid",
+        type=int,
+        metavar="PID",
+        help="Process ID to kill",
     )
 
     sp_kp = sub.add_parser(
@@ -1801,6 +368,28 @@ Examples:
 
     _sp_conflicts = sub.add_parser(
         "conflicts", parents=[parent_parser], help="Detect docker/local port conflicts"
+    )
+
+    sub.add_parser(
+        "doctor",
+        parents=[parent_parser],
+        help="Environment-wide read-only diagnostic report",
+    )
+
+    sp_connections = sub.add_parser(
+        "connections", parents=[parent_parser], help="List active network connections"
+    )
+    sp_connections.add_argument(
+        "--pid", type=int, help="Filter connections by process ID"
+    )
+    sp_connections.add_argument(
+        "--process", type=str, help="Filter connections by process name"
+    )
+    sp_connections.add_argument(
+        "--port", type=int, help="Filter connections by local or remote port"
+    )
+    sp_connections.add_argument(
+        "--state", type=str, help="Filter connections by connection state (e.g. ESTABLISHED)"
     )
 
     sp_watch = sub.add_parser(
@@ -1852,41 +441,87 @@ Examples:
         "shell", choices=["bash", "zsh", "fish", "powershell"], help="Target shell"
     )
 
-    args = parser.parse_args(argv)
-
-    if getattr(args, "mcp", False):
-        try:
-            from .mcp_server import run_mcp_server
-
-            run_mcp_server()
-            return EXIT_OK
-        except ImportError:
-            print(
-                colorize("Error: MCP server module not available.", Colors.RED),
-                file=sys.stderr,
-            )
-            return EXIT_GENERAL_ERROR
-        except Exception as e:  # noqa: BLE001 - top-level MCP server error handler
-            print(colorize(f"MCP server error: {e}", Colors.RED), file=sys.stderr)
-            return EXIT_GENERAL_ERROR
-
-    # Load configuration
-    cfg = load_config(
-        getattr(args, "config", None), debug=getattr(args, "debug", False)
+    sp_setup_sudo = sub.add_parser(
+        "setup-sudo",
+        parents=[parent_parser],
+        help="Install a /usr/local/bin/kport launcher so 'sudo kport' works from pip/pipx installs",
     )
-    apply_config_defaults(args, cfg)
+    sp_setup_sudo.add_argument(
+        "--target",
+        type=str,
+        default="/usr/local/bin/kport",
+        metavar="PATH",
+        help="Destination path for the wrapper script (default: /usr/local/bin/kport)",
+    )
 
-    inspector = get_inspector()
+    sp_hold = sub.add_parser(
+        "hold",
+        parents=[parent_parser],
+        help="Temporarily bind and reserve a port to block other applications",
+    )
+    sp_hold.add_argument("port", type=int, help="Port number to hold/reserve")
+    sp_hold.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Automatically release port after N seconds",
+    )
 
-    if (
-        getattr(args, "interactive", False)
-        or getattr(args, "command", None) == "interactive"
-    ):
-        from .interactive import run_interactive_picker
+    sp_audit = sub.add_parser(
+        "audit",
+        parents=[parent_parser],
+        help="Inspect audit log history of destructive kport actions",
+    )
+    sp_audit.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Number of recent entries to show (default: 20)",
+    )
 
-        return run_interactive_picker(inspector, args)
+    parser._raw_argv = argv
+    args: argparse.Namespace | None = None
+    raw_args = argv if argv is not None else sys.argv[1:]
+    is_json = "--json" in raw_args
 
     try:
+        args = parser.parse_args(argv)
+        is_json = getattr(args, "json", False)
+
+        if getattr(args, "mcp", False):
+            try:
+                from .mcp_server import run_mcp_server
+
+                run_mcp_server()
+                return EXIT_OK
+            except ImportError:
+                print(
+                    colorize("Error: MCP server module not available.", Colors.RED),
+                    file=sys.stderr,
+                )
+                return EXIT_GENERAL_ERROR
+            except Exception as e:  # noqa: BLE001 - top-level MCP server error handler
+                print(colorize(f"MCP server error: {e}", Colors.RED), file=sys.stderr)
+                return EXIT_GENERAL_ERROR
+
+        # Load configuration
+        cfg = load_config(
+            getattr(args, "config", None), debug=getattr(args, "debug", False)
+        )
+        apply_config_defaults(args, cfg)
+
+        inspector = get_inspector()
+
+        # 0. Interactive TUI — kept inside the unified try/except so Ctrl+C is handled cleanly
+        if (
+            getattr(args, "interactive", False)
+            or getattr(args, "command", None) == "interactive"
+        ):
+            from .interactive import run_interactive_picker
+
+            return run_interactive_picker(inspector, args)
+
         # 1. Product subcommands routing
         if getattr(args, "command", None):
             return handle_product_command(args, inspector)
@@ -1903,1057 +538,104 @@ Examples:
                 args.kill_process,
                 args.kill_all,
                 args.kill_range,
+                args.pid is not None,
             ]
         ):
             parser.print_help()
             return EXIT_OK
 
-        # 2. Legacy flag parsing and execution
+        # 2. Legacy flag execution routing
+        return handle_legacy_command(args, inspector)
 
-        # List ports
-        if args.list:
-            bindings = inspector.list_listening(proto=getattr(args, "proto", "tcp"))
-            if args.json:
-                print(jsonify_bindings(bindings))
-            else:
-                print(colorize("\n📋 Listening ports\n", Colors.CYAN + Colors.BOLD))
-                print_table_listen(bindings)
-
-        # Inspect port
-        if args.inspect is not None:  # C6: use is not None, not truthiness
-            validate_port(args.inspect)
-            local_bindings = inspector.find_bindings_on_port(
-                args.inspect, proto=getattr(args, "proto", "tcp")
-            )
-            docker_hits = docker_mappings_for_host_port(args.inspect, debug=args.debug)
-            pids = inspector.find_pids_on_port(
-                args.inspect, proto=getattr(args, "proto", "tcp")
-            )
-            if not pids:
-                if docker_hits:
-                    m = docker_hits[0]
-                    if args.json:
-                        print(
-                            json.dumps(
-                                {
-                                    "port": args.inspect,
-                                    "type": "docker",
-                                    "container": m.container_name,
-                                    "image": m.image,
-                                    "host_port": m.host_port,
-                                    "container_port": m.container_port,
-                                    "status": m.status,
-                                },
-                                indent=2,
-                            )
-                        )
-                    else:
-                        print(
-                            colorize(
-                                f"\n🐳 Port {args.inspect} is mapped to Docker container: {m.container_name}\n",
-                                Colors.GREEN + Colors.BOLD,
-                            )
-                        )
-                        print(f"Image: {m.image}")
-                        print(
-                            f"Host Port: {m.host_port} → Container Port: {m.container_port}/{m.proto}"
-                        )
-                        print(f"Status: {m.status}")
-                elif local_bindings:
-                    msg = "Port is in use, but the owning PID is not visible (try running with sudo/admin)."
-                    if args.json:
-                        print(
-                            json.dumps(
-                                {
-                                    "port": args.inspect,
-                                    "type": "local-unknown",
-                                    "message": msg,
-                                    "bindings": [asdict(b) for b in local_bindings],
-                                },
-                                indent=2,
-                            )
-                        )
-                    else:
-                        print(colorize("⚠ " + msg, Colors.YELLOW))
-                else:
-                    msg = f"No processes found using port {args.inspect}"
-                    if args.json:
-                        print(json.dumps({"port": args.inspect, "pids": []}))
-                    else:
-                        print(colorize("❌ " + msg, Colors.RED))
-            else:
-                info_list = []
-                for pid in pids:
-                    info = inspector.get_process_info(pid)
-                    info_list.append(
-                        {"pid": pid, "process": asdict(info) if info else None}
-                    )
-                if args.json:
-                    out = {"port": args.inspect, "pids": info_list}
-                    if docker_hits:
-                        out["docker"] = [asdict(m) for m in docker_hits]
-                    print(json.dumps(out, indent=2))
-                else:
-                    print(
-                        colorize(
-                            f"\n🔍 Port {args.inspect} is used by PID(s): {', '.join(map(str, pids))}\n",
-                            Colors.GREEN + Colors.BOLD,
-                        )
-                    )
-                    if docker_hits:
-                        m = docker_hits[0]
-                        print(
-                            colorize(
-                                f"🐳 Docker mapping: {m.container_name} ({m.image}) host {m.host_port} → {m.container_port}/{m.proto}",
-                                Colors.CYAN,
-                            )
-                        )
-                    for entry in info_list:
-                        pid = entry["pid"]
-                        proc = entry["process"]
-                        if proc:
-                            print(
-                                colorize(
-                                    f"PID {pid}: {proc['name']} (user={proc.get('user')})",
-                                    Colors.WHITE,
-                                )
-                            )
-                            if proc.get("cmdline"):
-                                print(f"  cmd: {' '.join(proc['cmdline'])}")
-                        else:
-                            print(
-                                colorize(f"PID {pid}: info unavailable", Colors.YELLOW)
-                            )
-
-        # Inspect multiple ports
-        if args.inspect_multiple:
-            ports = args.inspect_multiple
-            results = []
-            for port in ports:
-                validate_port(port)
-                pids = inspector.find_pids_on_port(port)
-                for pid in pids:
-                    proc = inspector.get_process_info(pid)
-                    results.append(
-                        {
-                            "port": port,
-                            "pid": pid,
-                            "process": asdict(proc) if proc else None,
-                        }
-                    )
-            if args.json:
-                print(json.dumps(results, indent=2))
-            else:
-                print(
-                    colorize(
-                        f"\n🔍 Inspecting {len(ports)} port(s)...\n",
-                        Colors.CYAN + Colors.BOLD,
-                    )
-                )
-                if not results:
-                    print(
-                        colorize(
-                            "❌ No processes found on any of the specified ports",
-                            Colors.RED,
-                        )
-                    )
-                else:
-                    print(
-                        colorize(f"{'Port':<8} {'PID':<8} {'Process':<30}", Colors.BOLD)
-                    )
-                    print("─" * 60)
-                    for r in results:
-                        pname = r["process"]["name"] if r["process"] else "-"
-                        print(
-                            f"{colorize(str(r['port']), Colors.CYAN):<8} {r['pid']!s:<8} {pname:<30}"
-                        )
-                    print(
-                        colorize(
-                            f"\n✓ Found processes on {len(results)} items", Colors.GREEN
-                        )
-                    )
-
-        # Inspect range
-        if args.inspect_range:
-            ports = parse_port_range(args.inspect_range)
-            results = []
-            for port in ports:
-                pids = inspector.find_pids_on_port(port)
-                for pid in pids:
-                    proc = inspector.get_process_info(pid)
-                    results.append(
-                        {
-                            "port": port,
-                            "pid": pid,
-                            "process": asdict(proc) if proc else None,
-                        }
-                    )
-            if args.json:
-                print(json.dumps(results, indent=2))
-            else:
-                print(
-                    colorize(
-                        f"\n🔍 Inspecting port range {args.inspect_range} ({len(ports)} ports)...\n",
-                        Colors.CYAN + Colors.BOLD,
-                    )
-                )
-                if not results:
-                    print(
-                        colorize(
-                            f"❌ No processes found in port range {args.inspect_range}",
-                            Colors.RED,
-                        )
-                    )
-                else:
-                    print(
-                        colorize(f"{'Port':<8} {'PID':<8} {'Process':<30}", Colors.BOLD)
-                    )
-                    print("─" * 60)
-                    for r in results:
-                        pname = r["process"]["name"] if r["process"] else "-"
-                        print(
-                            f"{colorize(str(r['port']), Colors.CYAN):<8} {r['pid']!s:<8} {pname:<30}"
-                        )
-                    print(
-                        colorize(
-                            f"\n✓ Found processes on {len(results)} entries",
-                            Colors.GREEN,
-                        )
-                    )
-
-        # Inspect by process name
-        if args.inspect_process:
-            pname = args.inspect_process
-            # find_ports_by_process_name() uses 3-layer cross-platform strategy —
-            # resolves ports without elevation on Windows (ctypes IPHLPAPI) and for
-            # most snap/container processes on Linux (/proc/<pid>/net/tcp fallback).
-            bindings = inspector.find_ports_by_process_name(
-                pname, exact=args.exact, proto=getattr(args, "proto", "tcp")
-            )
-            if args.json:
-                print(jsonify_bindings(bindings))
-                if not bindings:
-                    pids = inspector.find_pids_by_name(pname, exact=args.exact)
-                    if pids:
-                        pids_str = ", ".join(map(str, pids))
-                        if not _is_elevated():
-                            if sys.platform == "win32":
-                                _elev_hint = (
-                                    f"Warning: Found process(es) (PID(s): {pids_str}) but could not "
-                                    f"read their port bindings. "
-                                    f"Try running as Administrator: Right-click your terminal → 'Run as administrator'"
-                                )
-                            else:
-                                _elev_hint = (
-                                    f"Warning: Found process(es) (PID(s): {pids_str}) but could not "
-                                    f"read their port bindings. Common inside containers/snap. "
-                                    f"Try: sudo kport -ip '{pname}'"
-                                )
-                            print(
-                                colorize(_elev_hint, Colors.YELLOW),
-                                file=sys.stderr,
-                            )
-                        else:
-                            print(
-                                colorize(
-                                    f"Warning: Process(es) '{pname}' (PID(s): {pids_str}) are running "
-                                    f"but not listening on any network ports.",
-                                    Colors.YELLOW,
-                                ),
-                                file=sys.stderr,
-                            )
-            else:
-                print(
-                    colorize(
-                        f"\n\U0001f50d Inspecting processes matching '{pname}'\n",
-                        Colors.CYAN + Colors.BOLD,
-                    )
-                )
-                if not bindings:
-                    pids = inspector.find_pids_by_name(pname, exact=args.exact)
-                    if pids:
-                        pids_str = ", ".join(map(str, pids))
-                        if not _is_elevated():
-                            # Process visible, ports not resolvable — needs elevated privileges.
-                            if sys.platform == "win32":
-                                _elev_msg = (
-                                    f"\u26a0  Process '{pname}' found (PID(s): {pids_str}) "
-                                    f"but its port bindings are not accessible without elevated privileges.\n"
-                                    f"   Try: Run your terminal as Administrator "
-                                    f"(Right-click → 'Run as administrator') and retry."
-                                )
-                            else:
-                                _elev_msg = (
-                                    f"\u26a0  Process '{pname}' found (PID(s): {pids_str}) "
-                                    f"but its port bindings are not accessible without elevated privileges.\n"
-                                    f"   This is common for snap-packaged apps or system services.\n"
-                                    f"   Try: sudo kport -ip '{pname}'"
-                                )
-                            print(colorize(_elev_msg, Colors.YELLOW))
-                        else:
-                            # Elevated and genuinely no listening ports — correct result, not an error.
-                            print(
-                                colorize(
-                                    f"\u2139  Process '{pname}' (PID(s): {pids_str}) is running "
-                                    f"but is not listening on any network ports.",
-                                    Colors.CYAN,
-                                )
-                            )
-                    else:
-                        print(
-                            colorize(
-                                f"\u274c No processes found matching '{pname}'",
-                                Colors.RED,
-                            )
-                        )
-                else:
-                    pid_groups: dict[int, list] = {}
-                    for b in bindings:
-                        pid_groups.setdefault(b.pid or 0, []).append(b)
-                    print(
-                        colorize(
-                            f"{'PID':<8} {'Process':<25} {'Port':<8} {'State':<12}",
-                            Colors.BOLD,
-                        )
-                    )
-                    print("\u2500" * 70)
-                    for pid, ports in pid_groups.items():
-                        proc_name = ports[0].process_name or "-"
-                        print(
-                            f"{colorize(str(pid), Colors.CYAN):<8} {proc_name:<25} {ports[0].port:<8} {ports[0].state or '-':<12}"
-                        )
-                        for p in ports[1:]:
-                            print(f"{'':8} {'':25} {p.port:<8} {p.state or '-':<12}")
-                    print(
-                        colorize(
-                            f"\n\u2713 Total processes found: {len(pid_groups)}",
-                            Colors.GREEN,
-                        )
-                    )
-                    print(
-                        colorize(
-                            f"\u2713 Total connections: {len(bindings)}", Colors.GREEN
-                        )
-                    )
-
-        # Kill by process name (legacy)
-        if args.kill_process:
-            pname = args.kill_process
-            pids = inspector.find_pids_by_name(pname, exact=args.exact)
-            if not pids:
-                if args.json:
-                    print(json.dumps({"name": pname, "pids": []}, indent=2))
-                else:
-                    print(
-                        colorize(
-                            f"❌ No processes found matching '{pname}'", Colors.RED
-                        )
-                    )
-            else:
-                # Check safety policy
-                safe, safety_msg = check_safety_policy(None, pids, args, inspector)
-                if not safe:
-                    if args.json:
-                        print(
-                            json.dumps(
-                                {
-                                    "name": pname,
-                                    "success": False,
-                                    "message": safety_msg,
-                                },
-                                indent=2,
-                            )
-                        )
-                    else:
-                        print(colorize(safety_msg, Colors.RED), file=sys.stderr)
-                    return EXIT_PERMISSION
-                if args.json:
-                    if not args.yes:
-                        out = []
-                        for pid in pids:
-                            info = inspector.get_process_info(pid)
-                            out.append(
-                                {"pid": pid, "process": asdict(info) if info else None}
-                            )
-                        print(
-                            json.dumps(
-                                {
-                                    "name": pname,
-                                    "pids": out,
-                                    "message": "Note: Use --yes to actually perform kills.",
-                                },
-                                indent=2,
-                            )
-                        )
-                    else:
-                        killed = []
-                        failed = []
-                        for pid in pids:
-                            if getattr(args, "kill_tree", False):
-                                ok, msg = inspector.kill_process_tree(
-                                    pid,
-                                    graceful_timeout=_resolve_timeout(args),
-                                    force=args.force,
-                                    dry_run=args.dry_run,
-                                    assume_yes=args.yes,
-                                )
-                            else:
-                                ok, msg = inspector.kill_pid(
-                                    pid,
-                                    graceful_timeout=_resolve_timeout(args),
-                                    force=args.force,
-                                    dry_run=args.dry_run,
-                                    assume_yes=args.yes,
-                                )
-
-                            if ok:
-                                killed.append({"pid": pid, "msg": msg})
-                            else:
-                                failed.append({"pid": pid, "msg": msg})
-                        print(
-                            json.dumps({"killed": killed, "failed": failed}, indent=2)
-                        )
-                        if failed:
-                            return EXIT_GENERAL_ERROR
-                else:
-                    print(
-                        colorize(
-                            f"Found {len(pids)} process(es) matching '{pname}':",
-                            Colors.YELLOW,
-                        )
-                    )
-                    for pid in pids:
-                        info = inspector.get_process_info(pid)
-                        display = f"PID {pid}: {info.name if info else 'Unknown'}"
-                        print(colorize("  " + display, Colors.WHITE))
-                    if not confirm_prompt(
-                        f"\nAre you sure you want to kill {len(pids)} process(es)?",
-                        assume_yes=args.yes,
-                    ):
-                        print(colorize("Operation cancelled.", Colors.YELLOW))
-                    else:
-                        killed_count = 0
-                        failed_count = 0
-                        for pid in pids:
-                            if getattr(args, "kill_tree", False):
-                                ok, msg = inspector.kill_process_tree(
-                                    pid,
-                                    graceful_timeout=_resolve_timeout(args),
-                                    force=args.force,
-                                    dry_run=args.dry_run,
-                                    assume_yes=args.yes,
-                                )
-                            else:
-                                ok, msg = inspector.kill_pid(
-                                    pid,
-                                    graceful_timeout=_resolve_timeout(args),
-                                    force=args.force,
-                                    dry_run=args.dry_run,
-                                    assume_yes=args.yes,
-                                )
-
-                            if ok:
-                                killed_count += 1
-                                print(
-                                    colorize(
-                                        f"✓ Killed PID {pid} ({msg})", Colors.GREEN
-                                    )
-                                )
-                            else:
-                                failed_count += 1
-                                print(
-                                    colorize(
-                                        f"✗ Failed to kill PID {pid} ({msg})",
-                                        Colors.RED,
-                                    )
-                                )
-
-                        if failed_count > 0:
-                            print(
-                                colorize(
-                                    f"\n✗ Failed to kill {failed_count}/{len(pids)} process(es)",
-                                    Colors.RED + Colors.BOLD,
-                                )
-                            )
-                            return EXIT_GENERAL_ERROR
-                        else:
-                            print(
-                                colorize(
-                                    f"\n✓ Successfully killed {killed_count}/{len(pids)} process(es)",
-                                    Colors.GREEN + Colors.BOLD,
-                                )
-                            )
-
-        # Kill single port (legacy)
-        if args.kill is not None:  # C6: use is not None, not truthiness
-            validate_port(args.kill)
-            pids = inspector.find_pids_on_port(
-                args.kill, proto=getattr(args, "proto", "tcp")
-            )
-
-            # Check safety policy
-            safe, safety_msg = check_safety_policy(args.kill, pids, args, inspector)
-            if not safe:
-                if args.json:
-                    print(
-                        json.dumps(
-                            {
-                                "port": args.kill,
-                                "success": False,
-                                "message": safety_msg,
-                            },
-                            indent=2,
-                        )
-                    )
-                else:
-                    print(colorize(safety_msg, Colors.RED), file=sys.stderr)
-                return EXIT_PERMISSION
-
-            local_bindings = inspector.find_bindings_on_port(
-                args.kill, proto=getattr(args, "proto", "tcp")
-            )
-            docker_hits = docker_mappings_for_host_port(args.kill, debug=args.debug)
-            if not pids:
-                if docker_hits:
-                    m = docker_hits[0]
-                    if args.json and not args.yes and not args.dry_run:
-                        print(
-                            json.dumps(
-                                {
-                                    "port": args.kill,
-                                    "type": "docker",
-                                    "container": m.container_name,
-                                    "container_id": m.container_id,
-                                    "message": "Refusing to act without --yes in JSON mode",
-                                },
-                                indent=2,
-                            )
-                        )
-                    else:
-                        action = "stop" if args.json else None
-                        if not args.json:
-                            print(
-                                colorize(
-                                    f"\n🐳 Port {args.kill} belongs to Docker container: {m.container_name}",
-                                    Colors.YELLOW + Colors.BOLD,
-                                )
-                            )
-                            action = choose_docker_action(assume_yes=args.yes)
-                        if (
-                            action == "rm"
-                            and not args.dry_run
-                            and not confirm_docker_rm(
-                                m.container_name,
-                                m.container_id,
-                                assume_yes=args.yes,
-                                force=args.force,
-                            )
-                        ):
-                                if args.json:
-                                    print(
-                                        json.dumps(
-                                            {
-                                                "port": args.kill,
-                                                "type": "docker",
-                                                "container": m.container_name,
-                                                "container_id": m.container_id,
-                                                "action": "rm",
-                                                "ok": False,
-                                                "message": "Removing a Docker container is irreversible. Use --force in addition to --yes to bypass interactive confirmation.",
-                                            },
-                                            indent=2,
-                                        )
-                                    )
-                                return EXIT_PERMISSION
-
-                        if action:
-                            ok, msg = docker_action_on_container(
-                                m.container_id,
-                                action=action,
-                                dry_run=args.dry_run,
-                                debug=args.debug,
-                            )
-                            wait_ok = True
-                            if (
-                                ok
-                                and getattr(args, "wait_for_exit", None) is not None
-                                and not args.dry_run
-                            ):
-                                if not args.json:
-                                    print(
-                                        colorize(
-                                            f"⌛ Waiting for port {args.kill} to be free (timeout {args.wait_for_exit}s)...",
-                                            Colors.WHITE,
-                                        )
-                                    )
-                                wait_ok = _poll_until_free(
-                                    args.kill, args.wait_for_exit, inspector
-                                )
-                                if not wait_ok and not args.json:
-                                    print(
-                                        colorize(
-                                            f"⏱ Process did not exit within {args.wait_for_exit}s",
-                                            Colors.RED,
-                                        ),
-                                        file=sys.stderr,
-                                    )
-                                elif wait_ok and not args.json:
-                                    print(
-                                        colorize(
-                                            f"✓ Port {args.kill} is now free.",
-                                            Colors.GREEN,
-                                        )
-                                    )
-
-                            if args.json:
-                                out = {
-                                    "port": args.kill,
-                                    "type": "docker",
-                                    "action": action,
-                                    "ok": ok,
-                                    "message": msg,
-                                }
-                                if getattr(args, "wait_for_exit", None) is not None:
-                                    out["wait_for_exit_ok"] = wait_ok
-                                print(json.dumps(out, indent=2))
-                            else:
-                                if ok and wait_ok:
-                                    print(
-                                        colorize(
-                                            ("✓ " if ok else "✗ ") + msg,
-                                            Colors.GREEN if ok else Colors.RED,
-                                        )
-                                    )
-                            if not ok or not wait_ok:
-                                return EXIT_GENERAL_ERROR
-
-                elif local_bindings:
-                    msg = "Port is in use but PID is not visible; cannot kill safely. Try sudo/admin."
-                    if args.json:
-                        print(
-                            json.dumps(
-                                {
-                                    "port": args.kill,
-                                    "ok": False,
-                                    "message": msg,
-                                    "bindings": [asdict(b) for b in local_bindings],
-                                },
-                                indent=2,
-                            )
-                        )
-                    else:
-                        print(colorize(msg, Colors.RED))
-                    return EXIT_PERMISSION
-                else:
-                    if args.json:
-                        print(
-                            json.dumps(
-                                {"port": args.kill, "killed": [], "failed": []},
-                                indent=2,
-                            )
-                        )
-                    else:
-                        print(
-                            colorize(
-                                f"❌ No process found using port {args.kill}",
-                                Colors.RED,
-                            )
-                        )
-            else:
-                if args.json:
-                    ok, msg = inspector.kill_port(
-                        args.kill,
-                        graceful_timeout=_resolve_timeout(args),
-                        force=args.force,
-                        dry_run=args.dry_run,
-                        debug=args.debug,
-                        assume_yes=args.yes,
-                        kill_tree=getattr(args, "kill_tree", False),
-                    )
-
-                    wait_ok = True
-                    if (
-                        ok
-                        and getattr(args, "wait_for_exit", None) is not None
-                        and not args.dry_run
-                    ):
-                        wait_ok = _poll_until_free(
-                            args.kill, args.wait_for_exit, inspector
-                        )
-                    out = {
-                        "port": args.kill,
-                        "success": ok,
-                        "message": msg,
-                        "pids_targeted": pids,
-                    }
-                    if docker_hits:
-                        out["docker"] = [asdict(m) for m in docker_hits]
-                    if getattr(args, "wait_for_exit", None) is not None:
-                        out["wait_for_exit_ok"] = wait_ok
-                    print(json.dumps(out, indent=2))
-                    return EXIT_OK if (ok and wait_ok) else EXIT_GENERAL_ERROR
-
-                else:
-                    print(
-                        colorize(
-                            f"Found PID(s) {', '.join(map(str, pids))} using port {args.kill}",
-                            Colors.YELLOW,
-                        )
-                    )
-                    if docker_hits:
-                        m = docker_hits[0]
-                        print(
-                            colorize(
-                                f"🐳 Docker mapping: {m.container_name} ({m.image}) host {m.host_port} → {m.container_port}/{m.proto}",
-                                Colors.CYAN,
-                            )
-                        )
-                    for pid in pids:
-                        info = inspector.get_process_info(pid)
-                        if info:
-                            print(
-                                colorize(
-                                    f"\nProcess to be terminated: PID {pid} - {info.name}",
-                                    Colors.YELLOW,
-                                )
-                            )
-                            if info.cmdline:
-                                print("  cmd:", " ".join(info.cmdline))
-                    if not confirm_prompt(
-                        "\nAre you sure you want to kill this process(es)?",
-                        assume_yes=args.yes,
-                    ):
-                        print(colorize("Operation cancelled.", Colors.YELLOW))
-                        return EXIT_GENERAL_ERROR
-                    else:
-                        ok, msg = inspector.kill_port(
-                            args.kill,
-                            graceful_timeout=_resolve_timeout(args),
-                            force=args.force,
-                            dry_run=args.dry_run,
-                            debug=args.debug,
-                            assume_yes=args.yes,
-                            kill_tree=getattr(args, "kill_tree", False),
-                        )
-
-                        wait_ok = True
-                        if (
-                            ok
-                            and getattr(args, "wait_for_exit", None) is not None
-                            and not args.dry_run
-                        ):
-                            print(
-                                colorize(
-                                    f"⌛ Waiting for port {args.kill} to be free (timeout {args.wait_for_exit}s)...",
-                                    Colors.WHITE,
-                                )
-                            )
-                            wait_ok = _poll_until_free(
-                                args.kill, args.wait_for_exit, inspector
-                            )
-                            if not wait_ok:
-                                print(
-                                    colorize(
-                                        f"⏱ Process did not exit within {args.wait_for_exit}s",
-                                        Colors.RED,
-                                    ),
-                                    file=sys.stderr,
-                                )
-                            else:
-                                print(
-                                    colorize(
-                                        f"✓ Port {args.kill} is now free.", Colors.GREEN
-                                    )
-                                )
-
-                        if ok and wait_ok:
-                            print(
-                                colorize(
-                                    f"\n✓ Port {args.kill} successfully freed ({msg})",
-                                    Colors.GREEN + Colors.BOLD,
-                                )
-                            )
-                            return EXIT_OK
-                        else:
-                            print(
-                                colorize(
-                                    f"\n✗ Failed to free port {args.kill}: {msg if ok else 'Wait timeout'}",
-                                    Colors.RED + Colors.BOLD,
-                                )
-                            )
-                            return EXIT_GENERAL_ERROR
-
-        # Kill multiple ports (legacy)
-        if args.kill_all:
-            for port in args.kill_all:
-                validate_port(port)
-            # Safety shield check
-            for port in args.kill_all:
-                pids = inspector.find_pids_on_port(port)
-                safe, safety_msg = check_safety_policy(port, pids, args, inspector)
-                if not safe:
-                    print(
-                        colorize(
-                            f"Port {port} failed safety check: {safety_msg}", Colors.RED
-                        ),
-                        file=sys.stderr,
-                    )
-                    return EXIT_PERMISSION
-            port_pid_map = {}
-            for port in args.kill_all:
-                pids = inspector.find_pids_on_port(port)
-                if pids:
-                    port_pid_map[port] = pids
-            if not port_pid_map:
-                print(
-                    colorize(
-                        "❌ No processes found on any of the specified ports",
-                        Colors.RED,
-                    )
-                )
-            else:
-                print(
-                    colorize("Found processes on the following ports:", Colors.YELLOW)
-                )
-                for port, pids in port_pid_map.items():
-                    names = [
-                        inspector.get_process_info(pid).name
-                        if inspector.get_process_info(pid)
-                        else "?"
-                        for pid in pids
-                    ]
-                    print(
-                        colorize(
-                            f"  Port {port}: PIDs {', '.join(map(str, pids))} ({', '.join(names)})",
-                            Colors.WHITE,
-                        )
-                    )
-                if not confirm_prompt(
-                    f"\nAre you sure you want to kill {sum(len(ps) for ps in port_pid_map.values())} process(es)?",
-                    assume_yes=args.yes,
-                ):
-                    print(colorize("Operation cancelled.", Colors.YELLOW))
-                    return EXIT_GENERAL_ERROR
-                else:
-                    failed_ports = 0
-                    total_ports = len(port_pid_map)
-                    for port in port_pid_map:
-                        ok, msg = inspector.kill_port(
-                            port,
-                            graceful_timeout=_resolve_timeout(args),
-                            force=args.force,
-                            dry_run=args.dry_run,
-                            debug=args.debug,
-                            assume_yes=args.yes,
-                            kill_tree=getattr(args, "kill_tree", False),
-                        )
-
-                        if ok:
-                            print(
-                                colorize(f"✓ Freed port {port} ({msg})", Colors.GREEN)
-                            )
-                            if (
-                                getattr(args, "wait_for_exit", None) is not None
-                                and not args.dry_run
-                            ):
-                                print(
-                                    colorize(
-                                        f"⌛ Waiting for port {port} to be free (timeout {args.wait_for_exit}s)...",
-                                        Colors.WHITE,
-                                    )
-                                )
-                                wait_ok = _poll_until_free(
-                                    port, args.wait_for_exit, inspector
-                                )
-                                if not wait_ok:
-                                    print(
-                                        colorize(
-                                            f"⏱ Process did not exit within {args.wait_for_exit}s",
-                                            Colors.RED,
-                                        ),
-                                        file=sys.stderr,
-                                    )
-                                    failed_ports += 1
-                                else:
-                                    print(
-                                        colorize(
-                                            f"✓ Port {port} is now free.", Colors.GREEN
-                                        )
-                                    )
-                        else:
-                            print(
-                                colorize(
-                                    f"✗ Failed to free port {port}: {msg}", Colors.RED
-                                )
-                            )
-                            failed_ports += 1
-
-                    if failed_ports > 0:
-                        print(
-                            colorize(
-                                f"\n✗ Failed to free {failed_ports}/{total_ports} port(s)",
-                                Colors.RED + Colors.BOLD,
-                            )
-                        )
-                        return EXIT_GENERAL_ERROR
-                    else:
-                        print(
-                            colorize(
-                                f"\n✓ Successfully freed all {total_ports} port(s)",
-                                Colors.GREEN + Colors.BOLD,
-                            )
-                        )
-
-        # Kill range (legacy)
-        if args.kill_range:
-            ports = parse_port_range(args.kill_range)
-            # Safety shield check
-            for port in ports:
-                pids = inspector.find_pids_on_port(port)
-                safe, safety_msg = check_safety_policy(port, pids, args, inspector)
-                if not safe:
-                    print(
-                        colorize(
-                            f"Port {port} failed safety check: {safety_msg}", Colors.RED
-                        ),
-                        file=sys.stderr,
-                    )
-                    return EXIT_PERMISSION
-            port_pid_map = {}
-            for port in ports:
-                pids = inspector.find_pids_on_port(port)
-                if pids:
-                    port_pid_map[port] = pids
-            if not port_pid_map:
-                print(
-                    colorize(
-                        f"❌ No processes found in port range {args.kill_range}",
-                        Colors.RED,
-                    )
-                )
-            else:
-                print(
-                    colorize(
-                        f"Found processes on {len(port_pid_map)} port(s) in range:",
-                        Colors.YELLOW,
-                    )
-                )
-                for port, pids in port_pid_map.items():
-                    print(
-                        colorize(
-                            f"  Port {port}: PIDs {', '.join(map(str, pids))}",
-                            Colors.WHITE,
-                        )
-                    )
-                if not confirm_prompt(
-                    f"\nAre you sure you want to kill {sum(len(ps) for ps in port_pid_map.values())} process(es)?",
-                    assume_yes=args.yes,
-                ):
-                    print(colorize("Operation cancelled.", Colors.YELLOW))
-                    return EXIT_GENERAL_ERROR
-                else:
-                    failed_ports = 0
-                    total_ports = len(port_pid_map)
-                    for port in port_pid_map:
-                        ok, msg = inspector.kill_port(
-                            port,
-                            graceful_timeout=_resolve_timeout(args),
-                            force=args.force,
-                            dry_run=args.dry_run,
-                            debug=args.debug,
-                            assume_yes=args.yes,
-                            kill_tree=getattr(args, "kill_tree", False),
-                        )
-
-                        if ok:
-                            print(
-                                colorize(f"✓ Freed port {port} ({msg})", Colors.GREEN)
-                            )
-                            if (
-                                getattr(args, "wait_for_exit", None) is not None
-                                and not args.dry_run
-                            ):
-                                print(
-                                    colorize(
-                                        f"⌛ Waiting for port {port} to be free (timeout {args.wait_for_exit}s)...",
-                                        Colors.WHITE,
-                                    )
-                                )
-                                wait_ok = _poll_until_free(
-                                    port, args.wait_for_exit, inspector
-                                )
-                                if not wait_ok:
-                                    print(
-                                        colorize(
-                                            f"⏱ Process did not exit within {args.wait_for_exit}s",
-                                            Colors.RED,
-                                        ),
-                                        file=sys.stderr,
-                                    )
-                                    failed_ports += 1
-                                else:
-                                    print(
-                                        colorize(
-                                            f"✓ Port {port} is now free.", Colors.GREEN
-                                        )
-                                    )
-                        else:
-                            print(
-                                colorize(
-                                    f"✗ Failed to free port {port}: {msg}", Colors.RED
-                                )
-                            )
-                            failed_ports += 1
-
-                    if failed_ports > 0:
-                        print(
-                            colorize(
-                                f"\n✗ Failed to free {failed_ports}/{total_ports} port(s) in range",
-                                Colors.RED + Colors.BOLD,
-                            )
-                        )
-                        return EXIT_GENERAL_ERROR
-                    else:
-                        print(
-                            colorize(
-                                f"\n✓ Successfully freed all {total_ports} port(s) in range",
-                                Colors.GREEN + Colors.BOLD,
-                            )
-                        )
-
-    # Catch custom domain exceptions cleanly
+    # Catch custom domain exceptions cleanly without leaking internal code
     except InvalidPortError as e:
-        print(colorize(f"Error: {e}", Colors.RED), file=sys.stderr)
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {"code": "invalid_port", "message": str(e)},
+                })
+            )
+        else:
+            print(colorize(f"Error: {e}", Colors.RED), file=sys.stderr)
         return EXIT_INVALID_INPUT
     except PermissionDeniedError as e:
-        print(
-            colorize(
-                f"Permission denied: {e}. Try running with administrative privileges (sudo/admin).",
-                Colors.RED,
-            ),
-            file=sys.stderr,
-        )
+        hint = get_elevation_hint()
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {"code": "permission_denied", "message": str(e)},
+                })
+            )
+        else:
+            print(colorize(f"Permission denied: {e}\n\n{hint}", Colors.RED), file=sys.stderr)
+        if not is_json and sys.platform != "win32" and sys.stdin.isatty():
+            return re_exec_with_sudo()
         return EXIT_PERMISSION
     except KPortError as e:
-        print(colorize(f"kport error: {e}", Colors.RED), file=sys.stderr)
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {"code": "kport_error", "message": str(e)},
+                })
+            )
+        else:
+            print(colorize(f"kport error: {e}", Colors.RED), file=sys.stderr)
         return EXIT_GENERAL_ERROR
-    except PermissionError:
-        print(
-            colorize(
-                "Permission denied. Try running with elevated privileges (sudo/admin).",
-                Colors.RED,
-            ),
-            file=sys.stderr,
-        )
+    except PermissionError as e:
+        hint = get_elevation_hint()
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {
+                        "code": "permission_denied",
+                        "message": str(e) or "Insufficient privileges",
+                    },
+                })
+            )
+        else:
+            print(colorize(f"Permission denied.\n\n{hint}", Colors.RED), file=sys.stderr)
+        if not is_json and sys.platform != "win32" and sys.stdin.isatty():
+            return re_exec_with_sudo()
         return EXIT_PERMISSION
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user.")
-        return EXIT_GENERAL_ERROR
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {
+                        "code": "interrupted",
+                        "message": "Operation cancelled by user",
+                    },
+                })
+            )
+        else:
+            print(colorize("\nInterrupted.", Colors.YELLOW), file=sys.stderr)
+        return EXIT_INTERRUPTED
     except Exception as e:  # noqa: BLE001 - main entry point catch-all
-        print(colorize(f"Unexpected error: {e}", Colors.RED), file=sys.stderr)
-        return EXIT_GENERAL_ERROR
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {"code": "unexpected_error", "message": str(e)},
+                })
+            )
+        else:
+            print(colorize(f"Unexpected error: {e}", Colors.RED), file=sys.stderr)
+            if getattr(args, "debug", False) or "--debug" in raw_args:
+                import traceback
 
-    return EXIT_OK
+                traceback.print_exc()
+        return EXIT_GENERAL_ERROR
 
 
 if __name__ == "__main__":

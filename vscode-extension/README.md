@@ -4,7 +4,7 @@ Inspect and free ports from VS Code, and register the **kport MCP server** for A
 
 ## Prerequisites
 
-Install [kport](https://github.com/farman20ali/port-killer) on your machine:
+Install [kport](https://github.com/farman20ali/kport) on your machine:
 
 ```bash
 pip install kport

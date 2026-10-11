@@ -32,8 +32,8 @@ Feature suggestions are welcome! Please:
 
 1. **Fork the repository**
    ```bash
-   git clone https://github.com/farman20ali/port-killer.git
-   cd port-killer
+   git clone https://github.com/farman20ali/kport.git
+   cd kport
    ```
 
 2. **Create a branch**
@@ -79,8 +79,8 @@ Feature suggestions are welcome! Please:
 ### Installation for Development
 ```bash
 # Clone your fork
-git clone https://github.com/farman20ali/port-killer.git
-cd port-killer
+git clone https://github.com/farman20ali/kport.git
+cd kport
 
 # Set up the dev environment (editable install + dev dependencies)
 python manage.py setup

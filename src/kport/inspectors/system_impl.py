@@ -12,9 +12,10 @@ import shutil
 import socket
 import struct
 import subprocess
+import time
 from typing import Any
 
-from .base import BaseInspector, PortBinding, ProcessInfo
+from .base import BaseInspector, ConnectionInfo, PortBinding, ProcessInfo
 
 # --- Linux-native /proc parsing helpers ---
 
@@ -72,6 +73,58 @@ def _parse_proc_net_file(filename: str, family: str) -> list[tuple[str, int, int
     return sockets
 
 
+def _parse_proc_net_connections(filename: str, family: str) -> list[tuple[str, int, str, int, str, int]]:
+    """Parse socket information (local, remote, state, inode) from /proc/net/tcp*."""
+    sockets = []
+    if not os.path.exists(filename):
+        return sockets
+    try:
+        with open(filename, "r") as f:
+            lines = f.readlines()
+        if len(lines) <= 1:
+            return sockets
+        for line in lines[1:]:
+            parts = line.strip().split()
+            if len(parts) < 10:
+                continue
+            local_addr = parts[1]
+            remote_addr = parts[2]
+            state_hex = parts[3]
+            inode = int(parts[9])
+
+            state_map = {
+                "01": "ESTABLISHED", "02": "SYN_SENT", "03": "SYN_RECV",
+                "04": "FIN_WAIT1", "05": "FIN_WAIT2", "06": "TIME_WAIT",
+                "07": "CLOSE", "08": "CLOSE_WAIT", "09": "LAST_ACK",
+                "0A": "LISTEN", "0B": "CLOSING"
+            }
+            state = state_map.get(state_hex, f"STATE_{state_hex}")
+
+            try:
+                l_ip_hex, l_port_hex = local_addr.split(":")
+                l_port = int(l_port_hex, 16)
+                r_ip_hex, r_port_hex = remote_addr.split(":")
+                r_port = int(r_port_hex, 16)
+
+                if family == "IPv4":
+                    l_ip = parse_ipv4(l_ip_hex)
+                    r_ip = parse_ipv4(r_ip_hex)
+                else:
+                    l_ip = parse_ipv6(l_ip_hex)
+                    r_ip = parse_ipv6(r_ip_hex)
+
+                if state == "LISTEN" or r_ip in ("0.0.0.0", "::"):
+                    r_ip = "*"
+                    r_port = 0
+
+                sockets.append((l_ip, l_port, r_ip, r_port, state, inode))
+            except (ValueError, IndexError):
+                continue
+    except OSError:
+        pass
+    return sockets
+
+
 def _get_linux_inode_to_pid_map() -> dict[int, int]:
     """Map socket inodes to owning process PIDs on Linux."""
     inode_to_pid = {}
@@ -95,6 +148,25 @@ def _get_linux_inode_to_pid_map() -> dict[int, int]:
     except OSError:
         pass
     return inode_to_pid
+
+
+_BOOT_TIME: float | None = None
+
+
+def _get_boot_time() -> float:
+    global _BOOT_TIME
+    if _BOOT_TIME is not None:
+        return _BOOT_TIME
+    try:
+        with open("/proc/stat", "r") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    _BOOT_TIME = float(line.split()[1])
+                    return _BOOT_TIME
+    except Exception:
+        pass
+    _BOOT_TIME = 0.0
+    return _BOOT_TIME
 
 
 def _get_linux_process_info(pid: int) -> ProcessInfo | None:
@@ -127,7 +199,56 @@ def _get_linux_process_info(pid: int) -> ProcessInfo | None:
         if not name and cmdline:
             name = os.path.basename(cmdline[0])
 
-        return ProcessInfo(pid=pid, name=name, cmdline=cmdline, user=user)
+        ppid = None
+        try:
+            with open(f"/proc/{pid}/status", "r", errors="ignore") as f:
+                for line in f:
+                    if line.startswith("PPid:"):
+                        ppid = int(line.split()[1])
+                        break
+        except (OSError, ValueError, IndexError):
+            pass
+
+        cwd = None
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            pass
+
+        start_time = None
+        try:
+            with open(f"/proc/{pid}/stat", "r", errors="ignore") as f:
+                stat_content = f.read().strip()
+            rpar_idx = stat_content.rfind(")")
+            if rpar_idx != -1:
+                fields = stat_content[rpar_idx + 2:].split()
+                if len(fields) >= 20:
+                    ticks = int(fields[19])
+                    try:
+                        sc_clk_tck = os.sysconf("SC_CLK_TCK")
+                    except (AttributeError, ValueError):
+                        sc_clk_tck = 100
+                    btime = _get_boot_time()
+                    if btime > 0:
+                        start_time = btime + (ticks / sc_clk_tck)
+        except Exception:
+            pass
+
+        if start_time is None:
+            try:
+                start_time = float(stat_info.st_mtime)
+            except Exception:
+                pass
+
+        return ProcessInfo(
+            pid=pid,
+            name=name,
+            cmdline=cmdline,
+            user=user,
+            ppid=ppid,
+            cwd=cwd,
+            start_time=start_time,
+        )
     except OSError:
         return None
 
@@ -489,24 +610,154 @@ def _get_extended_udp_table_ipv6() -> list[PortBinding]:
     return bindings
 
 
+def _get_extended_tcp_connections_ipv4() -> list[ConnectionInfo]:
+    connections = []
+    if platform.system() != "Windows":
+        return connections
+
+    iphlpapi = ctypes.windll.iphlpapi
+    size = wintypes.DWORD(0)
+    res = iphlpapi.GetExtendedTcpTable(
+        None, ctypes.byref(size), True, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0
+    )
+
+    buf = ctypes.create_string_buffer(size.value)
+    res = iphlpapi.GetExtendedTcpTable(
+        buf, ctypes.byref(size), True, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0
+    )
+    if res != 0:
+        return []
+
+    num_entries = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
+    entry_size = ctypes.sizeof(MIB_TCPROW_OWNER_PID)
+    offset = ctypes.sizeof(wintypes.DWORD)
+
+    state_map = {
+        1: "CLOSED", 2: "LISTEN", 3: "SYN_SENT", 4: "SYN_RECV",
+        5: "ESTABLISHED", 6: "FIN_WAIT1", 7: "FIN_WAIT2",
+        8: "CLOSE_WAIT", 9: "CLOSING", 10: "LAST_ACK",
+        11: "TIME_WAIT", 12: "DELETE_TCB",
+    }
+
+    for i in range(num_entries):
+        entry_ptr = ctypes.cast(
+            ctypes.byref(buf, offset + i * entry_size),
+            ctypes.POINTER(MIB_TCPROW_OWNER_PID),
+        )
+        row = entry_ptr.contents
+        state = state_map.get(row.dwState, f"STATE_{row.dwState}")
+
+        l_ip_bytes = struct.pack("<I", row.dwLocalAddr)
+        l_ip = socket.inet_ntop(socket.AF_INET, l_ip_bytes)
+        l_port = socket.ntohs(row.dwLocalPort & 0xFFFF)
+
+        r_ip_bytes = struct.pack("<I", row.dwRemoteAddr)
+        r_ip = socket.inet_ntop(socket.AF_INET, r_ip_bytes)
+        r_port = socket.ntohs(row.dwRemotePort & 0xFFFF)
+
+        if state == "LISTEN" or r_ip == "0.0.0.0":
+            r_ip = "*"
+            r_port = None
+
+        pid = int(row.dwOwningPid)
+        connections.append(
+            ConnectionInfo(
+                pid=pid,
+                process_name=None,
+                proto="tcp",
+                local_address=l_ip,
+                local_port=l_port,
+                remote_address=r_ip,
+                remote_port=r_port,
+                state=state,
+            )
+        )
+    return connections
+
+
+def _get_extended_tcp_connections_ipv6() -> list[ConnectionInfo]:
+    connections = []
+    if platform.system() != "Windows":
+        return connections
+
+    iphlpapi = ctypes.windll.iphlpapi
+    size = wintypes.DWORD(0)
+    res = iphlpapi.GetExtendedTcpTable(
+        None, ctypes.byref(size), True, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0
+    )
+
+    buf = ctypes.create_string_buffer(size.value)
+    res = iphlpapi.GetExtendedTcpTable(
+        buf, ctypes.byref(size), True, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0
+    )
+    if res != 0:
+        return []
+
+    num_entries = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
+    entry_size = ctypes.sizeof(MIB_TCP6ROW_OWNER_PID)
+    offset = ctypes.sizeof(wintypes.DWORD)
+
+    state_map = {
+        1: "CLOSED", 2: "LISTEN", 3: "SYN_SENT", 4: "SYN_RECV",
+        5: "ESTABLISHED", 6: "FIN_WAIT1", 7: "FIN_WAIT2",
+        8: "CLOSE_WAIT", 9: "CLOSING", 10: "LAST_ACK",
+        11: "TIME_WAIT", 12: "DELETE_TCB",
+    }
+
+    for i in range(num_entries):
+        entry_ptr = ctypes.cast(
+            ctypes.byref(buf, offset + i * entry_size),
+            ctypes.POINTER(MIB_TCP6ROW_OWNER_PID),
+        )
+        row = entry_ptr.contents
+        state = state_map.get(row.dwState, f"STATE_{row.dwState}")
+
+        l_ip_bytes = bytes(row.ucLocalAddr)
+        l_ip = socket.inet_ntop(socket.AF_INET6, l_ip_bytes)
+        l_port = socket.ntohs(row.dwLocalPort & 0xFFFF)
+
+        r_ip_bytes = bytes(row.ucRemoteAddr)
+        r_ip = socket.inet_ntop(socket.AF_INET6, r_ip_bytes)
+        r_port = socket.ntohs(row.dwRemotePort & 0xFFFF)
+
+        if state == "LISTEN" or r_ip in ("::", "0:0:0:0:0:0:0:0"):
+            r_ip = "*"
+            r_port = None
+
+        pid = int(row.dwOwningPid)
+        connections.append(
+            ConnectionInfo(
+                pid=pid,
+                process_name=None,
+                proto="tcp",
+                local_address=l_ip,
+                local_port=l_port,
+                remote_address=r_ip,
+                remote_port=r_port,
+                state=state,
+            )
+        )
+    return connections
+
+
 def _windows_listening_native() -> list[PortBinding]:
     """Retrieve all Windows listening sockets natively using ctypes."""
     bindings = []
     try:
         bindings.extend(_get_extended_tcp_table_ipv4())
-    except Exception:  # noqa: BLE001, S110 - ignore native call failure
+    except Exception:
         pass
     try:
         bindings.extend(_get_extended_tcp_table_ipv6())
-    except Exception:  # noqa: BLE001, S110 - ignore native call failure
+    except Exception:
         pass
     try:
         bindings.extend(_get_extended_udp_table_ipv4())
-    except Exception:  # noqa: BLE001, S110 - ignore native call failure
+    except Exception:
         pass
     try:
         bindings.extend(_get_extended_udp_table_ipv6())
-    except Exception:  # noqa: BLE001, S110 - ignore native call failure
+    except Exception:
         pass
 
     for b in bindings:
@@ -515,6 +766,44 @@ def _windows_listening_native() -> list[PortBinding]:
             if info:
                 b.process_name = info.name
     return bindings
+
+
+def _get_windows_ppid_native(pid: int) -> int | None:
+    """Retrieve process parent PID natively on Windows using Toolhelp32Snapshot."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        h_snap = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        if h_snap == -1 or not h_snap:
+            return None
+        try:
+            class PROCESSENTRY32W(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", wintypes.LONG),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260),
+                ]
+            pe = PROCESSENTRY32W()
+            pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            if kernel32.Process32FirstW(h_snap, ctypes.byref(pe)):
+                while True:
+                    if pe.th32ProcessID == pid:
+                        return pe.th32ParentProcessID
+                    if not kernel32.Process32NextW(h_snap, ctypes.byref(pe)):
+                        break
+        finally:
+            kernel32.CloseHandle(h_snap)
+    except Exception:
+        pass
+    return None
 
 
 def _get_windows_process_info_native(pid: int) -> ProcessInfo | None:
@@ -529,13 +818,48 @@ def _get_windows_process_info_native(pid: int) -> ProcessInfo | None:
         try:
             size = wintypes.DWORD(260)
             buf = ctypes.create_unicode_buffer(260)
+            exe_path = None
+            name = None
             if kernel32.QueryFullProcessImageNameW(h_proc, 0, buf, ctypes.byref(size)):
                 exe_path = buf.value
                 name = os.path.basename(exe_path)
-                return ProcessInfo(pid=pid, name=name, exe=exe_path)
+
+            if not name:
+                return None
+
+            class FILETIME(ctypes.Structure):
+                _fields_ = [
+                    ("dwLowDateTime", wintypes.DWORD),
+                    ("dwHighDateTime", wintypes.DWORD),
+                ]
+            creation_time = FILETIME()
+            exit_time = FILETIME()
+            kernel_time = FILETIME()
+            user_time = FILETIME()
+            start_time = None
+            if kernel32.GetProcessTimes(
+                h_proc,
+                ctypes.byref(creation_time),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time)
+            ):
+                val = (creation_time.dwHighDateTime << 32) + creation_time.dwLowDateTime
+                if val > 0:
+                    start_time = (val / 10000000.0) - 11644473600.0
+
+            ppid = _get_windows_ppid_native(pid)
+
+            return ProcessInfo(
+                pid=pid,
+                name=name,
+                exe=exe_path,
+                ppid=ppid,
+                start_time=start_time
+            )
         finally:
             kernel32.CloseHandle(h_proc)
-    except Exception:  # noqa: BLE001, S110 - ignore native call failure
+    except Exception:
         pass
     return None
 
@@ -549,19 +873,23 @@ class FallbackInspector(BaseInspector):
         self._ps_exe = None
         self._process_info_cache: dict[int, ProcessInfo | None] = {}
         self._tasklist_cache: dict[int, str] | None = None
+        self._last_cache_time: float = 0.0
         if self.system == "Windows":
             self._ps_exe = shutil.which("powershell") or shutil.which("pwsh")
 
-    def _clear_cache(self) -> None:
-        """C1: Clear all per-PID caches before each public query.
+    def _clear_cache(self, ttl: float = 0.0) -> None:
+        """Clear all per-PID caches before queries.
 
-        In long-running modes (Watch Mode, MCP server) the OS reuses PIDs.
-        Stale cache entries would return the old dead process name for a new
-        process that happened to acquire the same PID. Clearing on every
-        public entry point ensures each query sees a fresh snapshot.
+        If ttl > 0, skips cache clearing if the existing snapshot is newer
+        than ttl seconds. This prevents disk churn during high-frequency polling
+        (e.g., watch mode).
         """
+        now = time.time()
+        if ttl > 0 and (now - self._last_cache_time) < ttl and self._last_cache_time > 0:
+            return
         self._process_info_cache.clear()
         self._tasklist_cache = None  # Force tasklist re-query on Windows
+        self._last_cache_time = now
 
     def _powershell(self) -> str | None:
         return self._ps_exe
@@ -656,7 +984,7 @@ class FallbackInspector(BaseInspector):
             bindings: list[PortBinding] = []
             try:
                 bindings = _windows_listening_native()
-            except Exception:  # noqa: BLE001, S110 - fallback if native windows call fails
+            except Exception:
                 pass
             if not bindings:
                 bindings = self._windows_listening(proto=proto)
@@ -681,6 +1009,42 @@ class FallbackInspector(BaseInspector):
                     bindings = [b for b in bindings if b.proto == "udp"]
             return bindings
 
+    def find_bindings_for_pid(self, pid: int) -> list[PortBinding]:
+        """Find all listening port bindings owned by *pid*.
+
+        On Linux, without elevated privileges the global inode→PID map
+        (_get_linux_inode_to_pid_map) cannot read /proc/<pid>/fd/ for
+        processes owned by other users (e.g. root daemons).  In that case
+        the binding appears in /proc/net/tcp with pid=None, so filtering
+        list_listening() by pid returns nothing.
+
+        Fallback: read /proc/<pid>/net/tcp[6] directly.  These files reflect
+        the process's own network-namespace view and are typically readable
+        without root in standard Linux configurations (not locked-down
+        containers or hardened namespaces).
+        """
+        # Stage 1: standard path — works when we own the process or are root
+        bindings = [b for b in self.list_listening(proto="both") if b.pid == pid]
+        if bindings:
+            return bindings
+
+        # Stage 2: Linux-only /proc/<pid>/net fallback
+        if self.system == "Linux":
+            try:
+                ns_bindings = _list_listening_proc_pid_net(pid)
+                if ns_bindings:
+                    # Attach process name from get_process_info so callers
+                    # get a populated process_name field.
+                    info = self.get_process_info(pid)
+                    pname = info.name if info else None
+                    for b in ns_bindings:
+                        b.process_name = pname
+                    return ns_bindings
+            except Exception:
+                pass
+
+        return bindings
+
     def find_bindings_on_port(self, port: int, proto: str = "tcp") -> list[PortBinding]:
         self._clear_cache()  # C1
         if self.system == "Windows":
@@ -693,7 +1057,7 @@ class FallbackInspector(BaseInspector):
                     elif proto == "udp":
                         return [b for b in filtered if b.proto == "udp"]
                     return filtered
-            except Exception:  # noqa: BLE001, S110 - fallback if native windows API fails
+            except Exception:
                 pass
             return self._windows_bindings_on_port(port, proto=proto)
         else:
@@ -730,16 +1094,25 @@ class FallbackInspector(BaseInspector):
 
         ps_tcp = None
         ps_udp = None
-        if proto in ("tcp", "both"):
-            ps_tcp = self._run_powershell_json(
-                f"Get-NetTCPConnection -State Listen -LocalPort {port} | "
-                "Select-Object LocalAddress,LocalPort,OwningProcess,State | ConvertTo-Json -Depth 3"
+        if proto == "both":
+            ps_both = self._run_powershell_json(
+                f"@{{ tcp = @(Get-NetTCPConnection -State Listen -LocalPort {port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,OwningProcess,State); "
+                f"udp = @(Get-NetUDPEndpoint -LocalPort {port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,OwningProcess) }} | ConvertTo-Json -Depth 4"
             )
-        if proto in ("udp", "both"):
-            ps_udp = self._run_powershell_json(
-                f"Get-NetUDPEndpoint -LocalPort {port} | "
-                "Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json -Depth 3"
-            )
+            if isinstance(ps_both, dict):
+                ps_tcp = ps_both.get("tcp")
+                ps_udp = ps_both.get("udp")
+        else:
+            if proto == "tcp":
+                ps_tcp = self._run_powershell_json(
+                    f"Get-NetTCPConnection -State Listen -LocalPort {port} | "
+                    "Select-Object LocalAddress,LocalPort,OwningProcess,State | ConvertTo-Json -Depth 3"
+                )
+            elif proto == "udp":
+                ps_udp = self._run_powershell_json(
+                    f"Get-NetUDPEndpoint -LocalPort {port} | "
+                    "Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json -Depth 3"
+                )
 
         if ps_tcp is not None or ps_udp is not None:
             _from_ps(ps_tcp, "tcp")
@@ -1013,7 +1386,7 @@ class FallbackInspector(BaseInspector):
                             }
                         )
                     return sorted({b.pid for b in bindings if b.port == port and b.pid})
-            except Exception:  # noqa: BLE001, S110 - fallback if native windows API fails
+            except Exception:
                 pass
             return self._windows_pids_on_port(port, proto=proto)
         else:
@@ -1021,7 +1394,7 @@ class FallbackInspector(BaseInspector):
                 bindings = _list_listening_linux_native() or []
                 if bindings:
                     if proto == "tcp":
-                        return sorted(
+                        pids = sorted(
                             {
                                 b.pid
                                 for b in bindings
@@ -1029,14 +1402,20 @@ class FallbackInspector(BaseInspector):
                             }
                         )
                     elif proto == "udp":
-                        return sorted(
+                        pids = sorted(
                             {
                                 b.pid
                                 for b in bindings
                                 if b.port == port and b.pid and b.proto == "udp"
                             }
                         )
-                    return sorted({b.pid for b in bindings if b.port == port and b.pid})
+                    else:
+                        pids = sorted({b.pid for b in bindings if b.port == port and b.pid})
+                    # Only short-circuit when we actually resolved PIDs for this port.
+                    # If pids is empty, the port may exist but owning PID is invisible to
+                    # unprivileged /proc scanning — fall through to ss/lsof.
+                    if pids:
+                        return pids
             except (OSError, ValueError, IndexError):
                 pass
             return self._unix_pids_on_port(port, proto=proto)
@@ -1146,7 +1525,7 @@ class FallbackInspector(BaseInspector):
                     info = _get_windows_process_info_native(pid)
                     if info:
                         return info
-                except Exception:  # noqa: BLE001, S110 - fallback if native windows call fails
+                except Exception:
                     pass
                 name = self._process_name_for_pid(pid)
                 if name:
@@ -1171,18 +1550,50 @@ class FallbackInspector(BaseInspector):
                         return info
                 except (OSError, ValueError, IndexError, AttributeError):
                     pass
+                from datetime import datetime
                 proc = self._run_subprocess(
-                    ["ps", "-p", str(pid), "-o", "pid=,comm=,user=,args="]
+                    ["ps", "-p", str(pid), "-o", "pid=,ppid=,comm=,user=,lstart=,args="]
                 )
                 out = proc.stdout.strip()
                 if not out:
                     return None
-                parts = re.split(r"\s+", out, maxsplit=2)
-                if len(parts) >= 2:
-                    name = parts[1]
-                    user = parts[2].split()[0] if len(parts) >= 3 else None
-                    return ProcessInfo(pid=pid, name=name, user=user)
-        except Exception:  # noqa: BLE001 - robust wrapper for process info retrieval
+                parts = re.split(r"\s+", out)
+                if len(parts) >= 10:
+                    try:
+                        ppid = int(parts[1])
+                    except (ValueError, IndexError):
+                        ppid = None
+                    name = parts[2]
+                    user = parts[3]
+                    start_time = None
+                    try:
+                        date_str = " ".join(parts[4:9])
+                        date_str = re.sub(r"\s+", " ", date_str)
+                        dt = datetime.strptime(date_str, "%a %b %d %H:%M:%S %Y")
+                        start_time = dt.timestamp()
+                    except Exception:
+                        pass
+                    cmdline = parts[9:] if len(parts) > 9 else None
+                    cwd = None
+                    if shutil.which("lsof"):
+                        try:
+                            res = self._run_subprocess(["lsof", "-p", str(pid), "-a", "-d", "cwd", "-F", "n"])
+                            for line in res.stdout.splitlines():
+                                if line.startswith("n"):
+                                    cwd = line[1:].strip()
+                                    break
+                        except Exception:
+                            pass
+                    return ProcessInfo(
+                        pid=pid,
+                        name=name,
+                        cmdline=cmdline,
+                        user=user,
+                        ppid=ppid,
+                        cwd=cwd,
+                        start_time=start_time,
+                    )
+        except Exception:
             return None
         return None
 
@@ -1218,9 +1629,7 @@ class FallbackInspector(BaseInspector):
             return sorted(pids)
         else:
             if shutil.which("pgrep"):
-                # pgrep -f matches the full command line including kport itself.
-                # Filter self-PID from results (R5).
-                args = ["pgrep", "-f", name] if not exact else ["pgrep", "-x", name]
+                args = ["pgrep", "-i", name] if not exact else ["pgrep", "-x", name]
                 proc = self._run_subprocess(args)
                 out = proc.stdout or ""
                 pids = []
@@ -1237,11 +1646,22 @@ class FallbackInspector(BaseInspector):
                 out = proc.stdout or ""
                 pids = []
                 for line in out.splitlines():
-                    if name in line if exact else name.lower() in line.lower():
-                        parts = re.split(r"\s+", line.strip())
-                        if len(parts) >= 2:
+                    if line.strip().startswith("UID"):
+                        continue
+                    parts = re.split(r"\s+", line.strip(), maxsplit=7)
+                    if len(parts) >= 8:
+                        pid_str = parts[1]
+                        cmd_field = parts[7]
+                        cmd_word = cmd_field.split()[0] if cmd_field.split() else ""
+                        pname = os.path.basename(cmd_word).strip("[]()")
+                        match = (
+                            (pname == name)
+                            if exact
+                            else (name.lower() in pname.lower())
+                        )
+                        if match:
                             try:
-                                pid = int(parts[1])
+                                pid = int(pid_str)
                                 if pid != self_pid:
                                     pids.append(pid)
                             except ValueError:
@@ -1287,7 +1707,7 @@ class FallbackInspector(BaseInspector):
             # Step 2: get all listening bindings via native IPHLPAPI (no elevation)
             try:
                 all_bindings = _windows_listening_native()
-            except Exception:  # noqa: BLE001 - fallback if native windows API call fails
+            except Exception:
                 all_bindings = []
 
             if not all_bindings:
@@ -1375,8 +1795,9 @@ class FallbackInspector(BaseInspector):
                 # Layer 2: per-process network namespace (/proc/<pid>/net/tcp)
                 # This handles snap-packaged / container processes whose sockets
                 # don't appear in the host /proc/net/tcp view.
-                if not results:
-                    for pid in pids_by_name:
+                seen_pids = {b.pid for b in results if b.pid}
+                for pid in pids_by_name:
+                    if pid not in seen_pids:
                         ns_bindings = _list_listening_proc_pid_net(pid)
                         for b in ns_bindings:
                             b.pid = pid
@@ -1547,3 +1968,300 @@ class FallbackInspector(BaseInspector):
             except (subprocess.SubprocessError, OSError, ValueError, RecursionError):
                 pass
             return []
+
+    def list_connections(self) -> list[ConnectionInfo]:
+        self._clear_cache()
+        if self.system == "Windows":
+            return self._windows_connections()
+        elif self.system == "Linux":
+            return self._linux_connections()
+        else:
+            return self._unix_connections()
+
+    def _windows_connections(self) -> list[ConnectionInfo]:
+        connections: list[ConnectionInfo] = []
+        try:
+            connections.extend(_get_extended_tcp_connections_ipv4())
+        except Exception:
+            pass
+        try:
+            connections.extend(_get_extended_tcp_connections_ipv6())
+        except Exception:
+            pass
+
+        if not connections:
+            connections = self._windows_connections_cmd_fallback()
+
+        # Deduplicate process name lookup by PID
+        unique_pids = {c.pid for c in connections if c.pid}
+        pid_to_name: dict[int, str | None] = {}
+        for pid in unique_pids:
+            if pid:
+                info = self.get_process_info(pid)
+                pid_to_name[pid] = info.name if info else None
+
+        for c in connections:
+            if c.pid:
+                c.process_name = pid_to_name.get(c.pid)
+
+        return connections
+
+    def _windows_connections_cmd_fallback(self) -> list[ConnectionInfo]:
+        connections: list[ConnectionInfo] = []
+        ps = self._powershell()
+        if ps:
+            data = self._run_powershell_json(
+                "Get-NetTCPConnection | "
+                "Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess,State | ConvertTo-Json -Depth 3"
+            )
+            if data is not None:
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    try:
+                        l_port = int(item.get("LocalPort"))
+                        pid = int(item.get("OwningProcess")) if item.get("OwningProcess") else None
+                        l_ip = item.get("LocalAddress")
+                        r_ip = item.get("RemoteAddress", "*")
+                        r_port = int(item.get("RemotePort")) if item.get("RemotePort") else None
+                        state = item.get("State", "UNKNOWN")
+                        if r_ip in ("0.0.0.0", "::", "*") or state == "Listen":
+                            r_ip = "*"
+                            r_port = None
+                        connections.append(
+                            ConnectionInfo(
+                                pid=pid,
+                                process_name=None,
+                                proto="tcp",
+                                local_address=l_ip,
+                                local_port=l_port,
+                                remote_address=r_ip,
+                                remote_port=r_port,
+                                state=state.upper(),
+                            )
+                        )
+                    except (ValueError, TypeError, KeyError):
+                        continue
+                return connections
+
+        if not shutil.which("netstat"):
+            return connections
+
+        try:
+            proc = self._run_subprocess(["netstat", "-ano"])
+            for line in proc.stdout.splitlines():
+                line = line.strip()
+                if not line or "Proto" in line or "Active" in line:
+                    continue
+                parts = re.split(r"\s+", line)
+                if len(parts) >= 4 and parts[0].upper() == "TCP":
+                    local_addr = parts[1]
+                    remote_addr = parts[2]
+                    state = parts[3]
+                    pid_str = parts[4] if len(parts) >= 5 else None
+
+                    try:
+                        pid = int(pid_str) if pid_str else None
+                    except ValueError:
+                        pid = None
+
+                    try:
+                        l_ip, l_port_str = local_addr.rsplit(":", 1)
+                        l_port = int(l_port_str)
+                    except ValueError:
+                        continue
+
+                    r_ip = "*"
+                    r_port = None
+                    if remote_addr and ":" in remote_addr:
+                        try:
+                            r_ip, r_port_str = remote_addr.rsplit(":", 1)
+                            r_port = int(r_port_str)
+                        except ValueError:
+                            pass
+
+                    if state == "LISTENING" or r_ip in ("0.0.0.0", "::", "*"):
+                        r_ip = "*"
+                        r_port = None
+
+                    connections.append(
+                        ConnectionInfo(
+                            pid=pid,
+                            process_name=None,
+                            proto="tcp",
+                            local_address=l_ip,
+                            local_port=l_port,
+                            remote_address=r_ip,
+                            remote_port=r_port,
+                            state="LISTEN" if state == "LISTENING" else state,
+                        )
+                    )
+        except Exception:
+            pass
+        return connections
+
+    def _linux_connections(self) -> list[ConnectionInfo]:
+        connections: list[ConnectionInfo] = []
+        inode_to_pid = _get_linux_inode_to_pid_map()
+
+        raw_conns = []
+        raw_conns.extend(_parse_proc_net_connections("/proc/net/tcp", "IPv4"))
+        raw_conns.extend(_parse_proc_net_connections("/proc/net/tcp6", "IPv6"))
+
+        # Deduplicate process name lookup
+        unique_pids = {inode_to_pid.get(inode) for _, _, _, _, _, inode in raw_conns if inode_to_pid.get(inode)}
+        pid_to_name: dict[int, str | None] = {}
+        for pid in unique_pids:
+            if pid:
+                info = self.get_process_info(pid)
+                pid_to_name[pid] = info.name if info else None
+
+        for l_ip, l_port, r_ip, r_port, state, inode in raw_conns:
+            pid = inode_to_pid.get(inode)
+            pname = pid_to_name.get(pid) if pid else None
+            connections.append(
+                ConnectionInfo(
+                    pid=pid,
+                    process_name=pname,
+                    proto="tcp",
+                    local_address=l_ip,
+                    local_port=l_port,
+                    remote_address=r_ip,
+                    remote_port=r_port if r_ip != "*" else None,
+                    state=state,
+                )
+            )
+
+        if not connections and shutil.which("ss"):
+            connections = self._linux_connections_ss_fallback()
+
+        return connections
+
+    def _linux_connections_ss_fallback(self) -> list[ConnectionInfo]:
+        connections: list[ConnectionInfo] = []
+        try:
+            proc = self._run_subprocess(["ss", "-tanp"])
+            for line in proc.stdout.splitlines():
+                if "State" in line or not line.strip():
+                    continue
+                parts = re.split(r"\s+", line.strip())
+                if len(parts) >= 5:
+                    state = parts[0].upper()
+                    laddr = parts[3]
+                    raddr = parts[4]
+                    users = parts[5] if len(parts) >= 6 else ""
+
+                    try:
+                        l_ip, l_port_str = laddr.rsplit(":", 1)
+                        l_port = int(l_port_str)
+                    except ValueError:
+                        continue
+
+                    r_ip = "*"
+                    r_port = None
+                    if raddr and ":" in raddr:
+                        try:
+                            r_ip, r_port_str = raddr.rsplit(":", 1)
+                            r_port = int(r_port_str)
+                        except ValueError:
+                            pass
+
+                    if state == "LISTEN" or r_ip in ("0.0.0.0", "[::]", "::", "*"):
+                        r_ip = "*"
+                        r_port = None
+
+                    pid = None
+                    pname = None
+                    m = re.search(r"pid=(\d+)", users)
+                    if m:
+                        pid = int(m.group(1))
+                        m_name = re.search(r'"([^"]+)"', users)
+                        if m_name:
+                            pname = m_name.group(1)
+
+                    connections.append(
+                        ConnectionInfo(
+                            pid=pid,
+                            process_name=pname,
+                            proto="tcp",
+                            local_address=l_ip,
+                            local_port=l_port,
+                            remote_address=r_ip,
+                            remote_port=r_port,
+                            state=state,
+                        )
+                    )
+        except Exception:
+            pass
+        return connections
+
+    def _unix_connections(self) -> list[ConnectionInfo]:
+        connections: list[ConnectionInfo] = []
+        if not shutil.which("lsof"):
+            return connections
+
+        try:
+            proc = self._run_subprocess(["lsof", "-nP", "-iTCP"])
+            for line in proc.stdout.splitlines():
+                if "COMMAND" in line or not line.strip():
+                    continue
+                parts = re.split(r"\s+", line.strip())
+                if len(parts) < 9:
+                    continue
+
+                pname = parts[0]
+                try:
+                    pid = int(parts[1])
+                except ValueError:
+                    pid = None
+
+                name_field = parts[8]
+                state = "UNKNOWN"
+                m_state = re.search(r"\((\w+)\)", name_field)
+                if m_state:
+                    state = m_state.group(1).upper()
+                    name_field = name_field.split("(")[0].strip()
+
+                l_ip = "*"
+                l_port = 0
+                r_ip = "*"
+                r_port = None
+
+                if "->" in name_field:
+                    local_part, remote_part = name_field.split("->", 1)
+                    try:
+                        l_ip, l_port_str = local_part.rsplit(":", 1)
+                        l_port = int(l_port_str)
+                    except ValueError:
+                        pass
+
+                    try:
+                        r_ip, r_port_str = remote_part.rsplit(":", 1)
+                        r_port = int(r_port_str)
+                    except ValueError:
+                        pass
+                else:
+                    try:
+                        l_ip, l_port_str = name_field.rsplit(":", 1)
+                        l_port = int(l_port_str)
+                    except ValueError:
+                        pass
+
+                if state == "LISTEN" or r_ip in ("0.0.0.0", "::", "*"):
+                    r_ip = "*"
+                    r_port = None
+
+                connections.append(
+                    ConnectionInfo(
+                        pid=pid,
+                        process_name=pname,
+                        proto="tcp",
+                        local_address=l_ip,
+                        local_port=l_port,
+                        remote_address=r_ip,
+                        remote_port=r_port,
+                        state=state,
+                    )
+                )
+        except Exception:
+            pass
+        return connections

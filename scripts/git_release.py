@@ -210,8 +210,8 @@ def main() -> None:
     print(f"\n  {Colors.BOLD}Next steps:{Colors.END}")
     if not args.no_pypi and pypi_success and not args.dry_run:
         print("    1. Upload to PyPI:    python manage.py publish --pypi")
-    print("    2. Watch Actions:     https://github.com/farman20ali/port-killer/actions")
-    print(f"    3. Check release:     https://github.com/farman20ali/port-killer/releases/tag/{tag}")
+    print("    2. Watch Actions:     https://github.com/farman20ali/kport/actions")
+    print(f"    3. Check release:     https://github.com/farman20ali/kport/releases/tag/{tag}")
     print(f"    4. Test install:      pip install kport=={version}")
 
     if not args.dry_run:

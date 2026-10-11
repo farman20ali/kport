@@ -1,9 +1,9 @@
 # 🔪 kport - Cross-Platform Port Inspector and Killer
 
-[![Version](https://img.shields.io/badge/version-4.0.3-blue.svg)](https://github.com/farman20ali/port-killer)
+[![Version](https://img.shields.io/badge/version-5.1.0-blue.svg)](https://github.com/farman20ali/kport)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/farman20ali/port-killer)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/farman20ali/kport)
 
 A powerful, cross-platform command-line tool to inspect, kill, and monitor processes using specific ports — with **AI safety shields**, **Watch Mode**, **Docker awareness**, and an **MCP server** for AI agent integration.
 
@@ -40,7 +40,7 @@ A powerful, cross-platform command-line tool to inspect, kill, and monitor proce
 
 ## 📦 Installation
 
-Pre-compiled platform-native packages are available on the [GitHub Releases](https://github.com/farman20ali/port-killer/releases) page.
+Pre-compiled platform-native packages are available on the [GitHub Releases](https://github.com/farman20ali/kport/releases) page.
 
 | Platform | Format | Quick Install |
 |---|---|---|
@@ -65,15 +65,15 @@ pip install kport
 ### Install from GitHub
 
 ```bash
-pip install --user git+https://github.com/farman20ali/port-killer.git
+pip install --user git+https://github.com/farman20ali/kport.git
 ```
 
 ### Install from Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/farman20ali/port-killer.git
-cd port-killer
+git clone https://github.com/farman20ali/kport.git
+cd kport
 
 # Install to user directory (recommended)
 pip install --user .
@@ -99,6 +99,15 @@ python -m kport -h
 # Inspect a port (local or docker)
 kport inspect 8080
 
+# Structured diagnostic analysis (observations, inferences, risks, recommendations)
+kport diagnose 8080
+
+# Environment-wide system diagnostics and health report
+kport doctor
+
+# Inspect and filter active network connections
+kport connections --port 8080
+
 # Explain why a port is blocked
 kport explain 8080
 
@@ -113,7 +122,17 @@ kport docker
 
 # Detect port conflicts (docker + local)
 kport conflicts
+
+# Reserve/hold a port to block other processes temporarily
+kport hold 8080 --timeout 60
+
+# Install system-wide launcher so 'sudo kport' works from pip/pipx installs
+kport setup-sudo
+
+# Inspect destructive action history from ~/.kport/audit.log
+kport audit --limit 20
 ```
+
 
 > Note: `--json`, `--dry-run`, `--yes`, and `--debug` work with all subcommands.
 
@@ -171,6 +190,12 @@ python -m kport.mcp_server
 - `list_ports` — List all active listening ports (local + Docker)
 - `inspect_port` — Detailed info about a specific port
 - `kill_port` — Free a port (always respects the Safety Shield)
+- `diagnose_port` — Structured diagnostic analysis (observations, inferences, risks, recommendations)
+- `list_connections` — Enumerate and filter active network connections (by PID, process, port, state)
+- `conflicts` — Detect Docker container vs native host process port collisions
+- `doctor` — Environment-wide diagnostics and system health check
+- `find_alternative_port` — Recommend next available free port(s) when `EADDRINUSE` occurs
+- `get_audit_history` — Inspect audit log history of destructive operations
 
 Configure in Claude Desktop / Cursor / VS Code Copilot:
 
@@ -189,11 +214,11 @@ Configure in Claude Desktop / Cursor / VS Code Copilot:
 
 On Linux, some ports may appear as `LISTEN` but the owning PID/process name is not visible without elevated privileges (common with system services).
 
-If you see `local-unknown` in `inspect` / `explain`, try:
+If you see `local-unknown` in `inspect` / `explain` / `diagnose`, try:
 
 ```bash
 sudo -E kport inspect 6379
-sudo -E kport explain 6379
+sudo -E kport diagnose 6379
 ```
 
 If you installed with `pip install --user kport`, `sudo` may not find `kport` because root's `PATH` doesn't include your user scripts directory.
@@ -230,7 +255,7 @@ Set persistent defaults via a JSON config file (searched in this priority order)
 }
 ```
 
-> **Note:** Setting `protected_ports` or `protected_processes` in your config **replaces** (not extends) the default Safety Shield lists.
+> **Note:** Setting `protected_ports` or `protected_processes` in your config **extends** (is additive to) the default Safety Shield lists.
 
 ### Inspect a port
 
@@ -531,8 +556,8 @@ We provide a unified task runner `manage.py` at the root of the project to simpl
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/farman20ali/port-killer.git
-cd port-killer
+git clone https://github.com/farman20ali/kport.git
+cd kport
 
 # 2. Set up the development environment (installs package in editable mode and dev dependencies)
 python manage.py setup
@@ -660,7 +685,7 @@ Colors should work on Windows 10 and later. If you're on an older version, color
 
 Farman Ali Ujjan - [alienhub.dev@gmail.com]
 
-Project Link: [https://github.com/farman20ali/port-killer](https://github.com/farman20ali/port-killer)
+Project Link: [https://github.com/farman20ali/kport](https://github.com/farman20ali/kport)
 
 ---
 

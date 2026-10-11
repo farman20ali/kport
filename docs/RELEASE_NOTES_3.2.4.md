@@ -84,11 +84,11 @@ All existing commands, flags, and configurations continue to work without modifi
 | Platform | Command |
 |---|---|
 | **PyPI** | `pip install kport==3.2.4` |
-| **Linux DEB** | See [Releases](https://github.com/farman20ali/port-killer/releases/tag/v3.2.4) |
-| **Linux RPM** | See [Releases](https://github.com/farman20ali/port-killer/releases/tag/v3.2.4) |
+| **Linux DEB** | See [Releases](https://github.com/farman20ali/kport/releases/tag/v3.2.4) |
+| **Linux RPM** | See [Releases](https://github.com/farman20ali/kport/releases/tag/v3.2.4) |
 | **Linux Snap** | `snap install kport` |
-| **macOS** | See [Releases](https://github.com/farman20ali/port-killer/releases/tag/v3.2.4) |
-| **Windows EXE** | See [Releases](https://github.com/farman20ali/port-killer/releases/tag/v3.2.4) |
+| **macOS** | See [Releases](https://github.com/farman20ali/kport/releases/tag/v3.2.4) |
+| **Windows EXE** | See [Releases](https://github.com/farman20ali/kport/releases/tag/v3.2.4) |
 | **Windows Chocolatey** | `choco install kport` |
 | **VS Code** | Extensions marketplace → search "KPort" |
 
@@ -137,10 +137,10 @@ See [`BUILD_GUIDE.md`](../BUILD_GUIDE.md) for full documentation.
 
 ## 📖 Resources
 
-- [GitHub Repository](https://github.com/farman20ali/port-killer)
+- [GitHub Repository](https://github.com/farman20ali/kport)
 - [PyPI Package](https://pypi.org/project/kport/)
 - [Snap Package](https://snapcraft.io/kport)
 - [VS Code Extension](https://marketplace.visualstudio.com/items?itemName=alienhub.kport-vscode)
-- [Issue Tracker](https://github.com/farman20ali/port-killer/issues)
+- [Issue Tracker](https://github.com/farman20ali/kport/issues)
 - [Build Guide](../BUILD_GUIDE.md)
 - [Model Context Protocol](https://modelcontextprotocol.io/)

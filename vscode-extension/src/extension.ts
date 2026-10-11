@@ -21,7 +21,7 @@ async function runKport(args: string[]): Promise<{ stdout: string; stderr: strin
     const err = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number };
     if (err.code === "ENOENT") {
       throw new Error(
-        `kport not found (${executable}). Install from https://github.com/farman20ali/port-killer/releases or set kport.executablePath.`
+        `kport not found (${executable}). Install from https://github.com/farman20ali/kport/releases or set kport.executablePath.`
       );
     }
     const message = (err.stderr || err.stdout || err.message || "kport command failed").trim();

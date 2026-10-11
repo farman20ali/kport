@@ -97,9 +97,10 @@ def print_table_listen(bindings: list[Any]) -> None:
     header_line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
     print(colorize(header_line, Colors.BOLD))
     print("─" * (sum(widths) + 2 * len(widths)))
-    for row, b in zip(rows, bindings):
+    for row, _b in zip(rows, bindings):
         cells = [_trunc(row[j], widths[j]).ljust(widths[j]) for j in range(len(widths))]
-        cells[0] = colorize(cells[0].strip(), Colors.CYAN).ljust(widths[0])
+        # Apply padding BEFORE colorize so ANSI bytes don't skew column width
+        cells[0] = colorize(_trunc(row[0], widths[0]).ljust(widths[0]).strip(), Colors.CYAN)
         print("  ".join(cells))
 
 
@@ -156,7 +157,8 @@ def print_table_docker(mappings: list[Any]) -> None:
     print("─" * (sum(widths) + 2 * len(widths)))
     for row in rows:
         cells = [_trunc(row[j], widths[j]).ljust(widths[j]) for j in range(len(widths))]
-        cells[0] = colorize(cells[0].strip(), Colors.CYAN).ljust(widths[0])
+        # Apply padding BEFORE colorize so ANSI bytes don't skew column width
+        cells[0] = colorize(_trunc(row[0], widths[0]).ljust(widths[0]).strip(), Colors.CYAN)
         print("  ".join(cells))
 
 
@@ -195,7 +197,8 @@ def print_table_list_product(local_bindings: list[Any], docker_maps: list[Any]) 
     print("─" * (sum(widths) + 2 * len(widths)))
     for row in data_rows:
         cells = [_trunc(row[j], widths[j]).ljust(widths[j]) for j in range(len(widths))]
-        cells[0] = colorize(cells[0].strip(), Colors.CYAN).ljust(widths[0])
+        # Apply padding BEFORE colorize so ANSI bytes don't skew column width
+        cells[0] = colorize(_trunc(row[0], widths[0]).ljust(widths[0]).strip(), Colors.CYAN)
         print("  ".join(cells))
 
 

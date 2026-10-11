@@ -140,7 +140,7 @@ def generate_debian_skeleton(work_dir: Path) -> str:
         Maintainer: {maint_name} <{maint_email}>
         Build-Depends: debhelper (>= {min(compat, 12)})
         Standards-Version: 4.5.0
-        Homepage: https://github.com/farman20ali/port-killer
+        Homepage: https://github.com/farman20ali/kport
         Rules-Requires-Root: no
 
         Package: kport

@@ -74,6 +74,29 @@ kport conflicts
 
 ---
 
+## 🛑 Stop Managed Services
+
+Stop a service-manager controlled process occupying a port **without raw process termination**:
+
+```bash
+# Stop the service managing port 8080 (prompts for confirmation)
+kport stop-service 8080
+
+# Preview the stop command without running it
+kport stop-service 8080 --dry-run
+
+# Escalate to process kill if service stop leaves port occupied
+kport stop-service 8080 --force
+
+# Non-interactive JSON output
+kport stop-service 8080 --yes --json
+```
+
+**Supported managers:** systemd, PM2, supervisord, Windows Services  
+**Note:** If no recognized manager is detected, use `kport kill` instead.
+
+---
+
 ## 👁️ Watch Mode
 
 Monitor a port and automatically kill processes that start using it:
@@ -152,7 +175,8 @@ Add to your Claude Desktop / Cursor config:
 }
 ```
 
-**MCP tools available:** `list_ports`, `inspect_port`, `kill_port` (all safety-shielded)
+**MCP tools available (8 total):** `list_ports`, `inspect_port`, `kill_port`, `diagnose_port`, `list_connections`, `conflicts`, `doctor`, `stop_service`  
+All tools carry annotations (`readOnlyHint` / `destructiveHint`). Destructive tools are safety-shielded.
 
 ---
 

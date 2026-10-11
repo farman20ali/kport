@@ -21,4 +21,4 @@ if sys.stdout and sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8'
 from kport.cli import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

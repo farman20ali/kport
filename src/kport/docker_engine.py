@@ -159,6 +159,22 @@ def docker_mappings_for_host_port(
     return [m for m in list_docker_mappings(debug=debug) if m.host_port == port]
 
 
+def docker_mappings_for_host_ports(
+    ports: list[int], debug: bool = False
+) -> dict[int, list[DockerPortMapping]]:
+    """Retrieve Docker port mappings for a batch of host ports in a single O(1) query.
+
+    Returns a dict mapping host_port -> list[DockerPortMapping].
+    """
+    target_ports = set(ports)
+    all_mappings = list_docker_mappings(debug=debug)
+    result: dict[int, list[DockerPortMapping]] = {p: [] for p in target_ports}
+    for m in all_mappings:
+        if m.host_port in target_ports:
+            result[m.host_port].append(m)
+    return result
+
+
 def docker_action_on_container(
     container_id: str, action: str, dry_run: bool, debug: bool = False
 ) -> tuple[bool, str]:

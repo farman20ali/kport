@@ -135,3 +135,48 @@ def log_docker_action(
         "docker_action": action,
     }
     _write(record)
+
+
+def log_service_stop(
+    port: int,
+    manager: str,
+    service_name: str,
+    command: str,
+    *,
+    dry_run: bool,
+    success: bool,
+    verified_free: bool,
+    message: str,
+) -> None:
+    """Record a managed service stop attempt."""
+    record = _base(dry_run=dry_run, success=success, message=message)
+    record["action"] = "stop_service"
+    record["target"] = {
+        "port": port,
+        "manager": manager,
+        "service_name": service_name,
+        "command": command,
+        "verified_free": verified_free,
+    }
+    _write(record)
+
+
+def read_recent_audit_events(limit: int = 20) -> list[dict[str, Any]]:
+    """Return up to limit most recent audit entries from ~/.kport/audit.log (newest first)."""
+    if not _LOG_FILE.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    try:
+        with open(_LOG_FILE, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return entries[-limit:][::-1]
+

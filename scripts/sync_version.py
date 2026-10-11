@@ -73,6 +73,24 @@ def sync_version(version: str) -> None:
                 f"\\g<1>{dotted_str}'),",
             )
 
+    # NSIS installer fallback version constant
+    win_nsi = ROOT / "packaging" / "windows" / "installer.nsi"
+    if win_nsi.exists():
+        replace_once(
+            win_nsi,
+            r'(!define VERSION\s+")[^"]+(")',
+            rf'\g<1>{version}\g<2>',
+        )
+
+    # macOS productbuild distribution manifest
+    macos_dist = ROOT / "packaging" / "macos" / "distribution.xml"
+    if macos_dist.exists():
+        replace_once(
+            macos_dist,
+            r'(<pkg-ref[^>]+\bversion=")[^"]+(")',
+            rf'\g<1>{version}\g<2>',
+        )
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sync kport version metadata")

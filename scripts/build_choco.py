@@ -55,7 +55,7 @@ CHOCO_DIR = REPO_ROOT / "packaging" / "chocolatey"
 NUSPEC_TEMPLATE = CHOCO_DIR / "kport.nuspec.template"
 INSTALL_TEMPLATE = CHOCO_DIR / "tools" / "chocolateyinstall.ps1.template"
 UNINSTALL_SCRIPT = CHOCO_DIR / "tools" / "chocolateyuninstall.ps1"
-GITHUB_REPO = "farman20ali/port-killer"
+GITHUB_REPO = "farman20ali/kport"
 
 
 def _c(text: str, code: str) -> str:

@@ -86,13 +86,13 @@ pip install --user kport==3.1.0
 
 ### Debian/Ubuntu
 ```bash
-wget https://github.com/farman20ali/port-killer/releases/download/v3.1.0/kport_3.1.0-1_all.deb
+wget https://github.com/farman20ali/kport/releases/download/v3.1.0/kport_3.1.0-1_all.deb
 sudo dpkg -i kport_3.1.0-1_all.deb
 ```
 
 ### From Source
 ```bash
-pip install git+https://github.com/farman20ali/port-killer.git@v3.1.0
+pip install git+https://github.com/farman20ali/kport.git@v3.1.0
 ```
 
 ---
@@ -155,10 +155,10 @@ kport inspect 8080 --json
 
 ## 📚 Documentation
 
-- **Installation Guide:** [INSTALL.md](https://github.com/farman20ali/port-killer/blob/main/INSTALL.md)
-- **Quick Start:** [QUICKSTART.md](https://github.com/farman20ali/port-killer/blob/main/QUICKSTART.md)
-- **Release Guide:** [RELEASE_GUIDE.md](https://github.com/farman20ali/port-killer/blob/main/RELEASE_GUIDE.md)
-- **Contributing:** [CONTRIBUTING.md](https://github.com/farman20ali/port-killer/blob/main/CONTRIBUTING.md)
+- **Installation Guide:** [INSTALL.md](https://github.com/farman20ali/kport/blob/main/INSTALL.md)
+- **Quick Start:** [QUICKSTART.md](https://github.com/farman20ali/kport/blob/main/QUICKSTART.md)
+- **Release Guide:** [RELEASE_GUIDE.md](https://github.com/farman20ali/kport/blob/main/RELEASE_GUIDE.md)
+- **Contributing:** [CONTRIBUTING.md](https://github.com/farman20ali/kport/blob/main/CONTRIBUTING.md)
 
 ---
 
@@ -179,10 +179,10 @@ Thanks to all contributors and users who provided feedback and bug reports.
 
 ## 📝 License
 
-GNU Affero General Public License v3.0 (AGPL-3.0) - see [LICENSE](https://github.com/farman20ali/port-killer/blob/main/LICENSE) for details.
+GNU Affero General Public License v3.0 (AGPL-3.0) - see [LICENSE](https://github.com/farman20ali/kport/blob/main/LICENSE) for details.
 
 **This license requires sharing source code modifications, even for network/SaaS use.**
 
 ---
 
-**Full Changelog:** https://github.com/farman20ali/port-killer/commits/v3.1.0
+**Full Changelog:** https://github.com/farman20ali/kport/commits/v3.1.0

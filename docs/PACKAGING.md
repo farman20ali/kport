@@ -11,7 +11,7 @@ This guide explains how to package `kport` into platform-native installation pac
 All packaging metadata, specs, and configurations live under `packaging/` and build scripts under `scripts/`:
 
 ```
-port-killer/
+kport/
 ├── manage.py                   # Universal developer entrypoint  ← START HERE
 ├── packaging/
 │   ├── windows/

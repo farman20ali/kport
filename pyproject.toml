@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kport"
-version = "4.0.3"
+version = "5.1.0"
 description = "A cross-platform command-line tool to inspect and kill processes using specific ports"
 readme = "README.md"
 authors = [
@@ -43,8 +43,8 @@ dev = [
 ]
 
 [project.urls]
-"Bug Reports" = "https://github.com/farman20ali/port-killer/issues"
-"Source" = "https://github.com/farman20ali/port-killer"
+"Bug Reports" = "https://github.com/farman20ali/kport/issues"
+"Source" = "https://github.com/farman20ali/kport"
 
 [project.scripts]
 kport = "kport.cli:main"
@@ -52,6 +52,14 @@ kport = "kport.cli:main"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 addopts = "--tb=short"
+markers = [
+    "unit: Unit tests for isolated domain and logic functions",
+    "cli: Tests for CLI command handling, argument parsing, and output formatting",
+    "mcp: Tests for MCP JSON-RPC protocol, tool execution, and safety shields",
+    "tui: Tests for interactive terminal UI and fallback menus",
+    "integration: Cross-module end-to-end integration workflows",
+    "packaging: Packaging and distribution checks",
+]
 
 [tool.coverage.run]
 branch = true
@@ -80,3 +88,18 @@ exclude_lines = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py38"
+
+[tool.ruff.lint]
+# S110 try-except-pass and BLE001 broad Exception are intentional in defensive
+# I/O and subprocess helpers (network, /proc, git, docker).
+# DTZ007 strptime without %z is intentional for platform-local timestamps.
+
+[tool.ruff.lint.per-file-ignores]
+"src/kport/diagnostics.py" = ["BLE001", "S110"]
+"src/kport/inspectors/system_impl.py" = ["BLE001", "S110", "DTZ007"]
+"src/kport/process_manager.py" = ["BLE001", "S110"]
+"src/kport/project.py" = ["BLE001", "S110"]

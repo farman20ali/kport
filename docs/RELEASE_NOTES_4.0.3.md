@@ -139,8 +139,8 @@ winget upgrade kport
 
 ## 🔗 Links
 
-- **GitHub Release:** https://github.com/farman20ali/port-killer/releases/tag/v4.0.3
+- **GitHub Release:** https://github.com/farman20ali/kport/releases/tag/v4.0.3
 - **Chocolatey Package:** https://community.chocolatey.org/packages/kport/4.0.3
 - **PyPI Package:** https://pypi.org/project/kport/4.0.3/
 - **Changelog:** [CHANGELOG.md](../CHANGELOG.md)
-- **Issues:** https://github.com/farman20ali/port-killer/issues
+- **Issues:** https://github.com/farman20ali/kport/issues

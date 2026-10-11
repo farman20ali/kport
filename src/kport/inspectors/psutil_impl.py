@@ -9,7 +9,11 @@ import os
 
 import psutil  # Safe to import because this implementation is dynamically loaded only when psutil is active.
 
-from .base import BaseInspector, PortBinding, ProcessInfo
+# Ensure psutil.Error base exception exists even under mock/stub environments
+if not hasattr(psutil, "Error"):
+    psutil.Error = Exception  # type: ignore[attr-defined]
+
+from .base import BaseInspector, ConnectionInfo, PortBinding, ProcessInfo
 
 
 class PsutilInspector(BaseInspector):
@@ -141,6 +145,53 @@ class PsutilInspector(BaseInspector):
                 )
         return sorted(bindings, key=lambda b: b.port)
 
+    def list_connections(self) -> list[ConnectionInfo]:
+        connections: list[ConnectionInfo] = []
+        try:
+            conns = psutil.net_connections(kind="tcp")
+        except psutil.Error:
+            return []
+
+        # Deduplicate process name lookup by PID to avoid N connections * N queries
+        unique_pids = {conn.pid for conn in conns if conn.pid}
+        pid_to_name: dict[int, str | None] = {}
+        for pid in unique_pids:
+            try:
+                p = psutil.Process(pid)
+                pid_to_name[pid] = p.name()
+            except psutil.Error:
+                pid_to_name[pid] = None
+
+        for conn in conns:
+            if not conn.laddr:
+                continue
+            l_ip = conn.laddr.ip if hasattr(conn.laddr, "ip") else conn.laddr[0]
+            l_port = conn.laddr.port if hasattr(conn.laddr, "port") else conn.laddr[1]
+
+            r_ip = "*"
+            r_port = None
+            if conn.raddr:
+                r_ip = conn.raddr.ip if hasattr(conn.raddr, "ip") else conn.raddr[0]
+                r_port = conn.raddr.port if hasattr(conn.raddr, "port") else conn.raddr[1]
+
+            pid = conn.pid
+            pname = pid_to_name.get(pid) if pid else None
+
+            connections.append(
+                ConnectionInfo(
+                    pid=pid,
+                    process_name=pname,
+                    proto="tcp",
+                    local_address=l_ip,
+                    local_port=l_port,
+                    remote_address=r_ip,
+                    remote_port=r_port,
+                    state=conn.status,
+                )
+            )
+
+        return sorted(connections, key=lambda c: (c.pid or 0, c.local_port))
+
     def get_process_info(self, pid: int) -> ProcessInfo | None:
         try:
             p = psutil.Process(pid)
@@ -160,12 +211,30 @@ class PsutilInspector(BaseInspector):
                 user = p.username() if hasattr(p, "username") else None
             except psutil.Error:
                 pass
+            ppid = None
+            try:
+                ppid = p.ppid()
+            except psutil.Error:
+                pass
+            cwd = None
+            try:
+                cwd = p.cwd() or None
+            except psutil.Error:
+                pass
+            start_time = None
+            try:
+                start_time = p.create_time() or None
+            except psutil.Error:
+                pass
             return ProcessInfo(
                 pid=pid,
                 name=p.name(),
                 exe=exe,
                 cmdline=cmdline,
                 user=user,
+                ppid=ppid,
+                cwd=cwd,
+                start_time=start_time,
             )
         except psutil.Error:
             return None
@@ -173,26 +242,25 @@ class PsutilInspector(BaseInspector):
     def find_pids_by_name(self, name: str, exact: bool = False) -> list[int]:
         out = []
         name_lower = name.lower()
-        for p in psutil.process_iter(["pid", "name", "cmdline"]):
+        self_pid = os.getpid()
+        for p in psutil.process_iter(["pid", "name"]):
             try:
+                pid = p.info["pid"]
+                if pid == self_pid:
+                    continue
                 pname = p.info["name"] or ""
                 compare = pname.lower()
                 match = (
                     (compare == name_lower)
                     if exact
-                    else (
-                        name_lower in compare
-                        or any(
-                            name_lower in (c or "").lower()
-                            for c in (p.info.get("cmdline") or [])
-                        )
-                    )
+                    else (name_lower in compare)
                 )
                 if match:
-                    out.append(p.info["pid"])
+                    out.append(pid)
             except psutil.Error:
                 continue
         return sorted(set(out))
+
 
     def find_ports_by_process_name(
         self, name: str, exact: bool = False, proto: str = "tcp"

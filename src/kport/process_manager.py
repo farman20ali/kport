@@ -119,22 +119,61 @@ def _detect_supervisor_app(pid: int) -> str | None:
     return None
 
 
+def _detect_windows_service(pid: int) -> str | None:
+    """Detect if PID is a Windows Service and return its service name(s)."""
+    try:
+        res = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH", "/SVC"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False
+        )
+        if res.returncode == 0 and res.stdout:
+            for line in res.stdout.splitlines():
+                line = line.strip()
+                if not line or "No tasks are running" in line:
+                    continue
+                # Split CSV safely
+                parts = [
+                    p.strip().strip('"')
+                    for p in re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', line)
+                ]
+                if len(parts) >= 3:
+                    services = parts[2]
+                    if services and services.upper() != "N/A":
+                        return services
+    except Exception:
+        pass
+    return None
+
+
 def detect_process_manager(
     pid: int, process_name: str | None = None
 ) -> dict[str, Any] | None:
     """
-    Detect if PID is managed by a process manager (systemd, pm2, supervisord).
+    Detect if PID is managed by a process manager (systemd, pm2, supervisord, Windows Service).
     Returns dict:
       {
-        "manager": "systemd" | "pm2" | "supervisor",
+        "manager": "systemd" | "pm2" | "supervisor" | "windows-service",
         "name": str,
-        "managed_by": str,  e.g. "systemd:nginx.service", "pm2:my-app", "supervisor:my-worker"
+        "managed_by": str,
         "warning": str
       }
     Or None if process is not managed by a known process manager.
     """
     if not pid or pid <= 0:
         return None
+
+    if os.name == "nt":
+        svc_name = _detect_windows_service(pid)
+        if svc_name:
+            return {
+                "manager": "windows-service",
+                "name": svc_name,
+                "managed_by": f"windows-service:{svc_name}",
+                "warning": f"Managed by Windows Service '{svc_name}'. Killing PID triggers auto-restart. Stop via 'net stop' or 'Stop-Service'.",
+            }
 
     # Check systemd cgroup first
     unit = _get_cgroup_systemd_unit(pid)

@@ -246,7 +246,7 @@ def _choco_resolve_checksum_interactive(version: str) -> list[str]:
     import urllib.request
 
     github_url = (
-        f"https://github.com/farman20ali/port-killer/releases/download/"
+        f"https://github.com/farman20ali/kport/releases/download/"
         f"v{version}/kport-{version}-setup.exe"
     )
 
