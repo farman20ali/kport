@@ -4,12 +4,11 @@ MCP PID tool round-trip tests (tests/mcp/test_mcp_pid_tools.py).
 
 from __future__ import annotations
 
-import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
-from kport.inspectors.base import ProcessInfo, PortBinding
+from kport.inspectors.base import ProcessInfo
 from kport.mcp_server import handle_inspect_pid, handle_kill_pid, handle_kill_process
 from tests.conftest import FakeInspector, _binding
 

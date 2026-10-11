@@ -60,7 +60,6 @@ from .formatter import (
     choose_docker_action,
     colorize,
     confirm_prompt,
-    jsonify_bindings,
     print_table_docker,
     print_table_list_product,
     print_table_listen,
@@ -789,7 +788,7 @@ def _select_pids_interactively(
             bindings = inspector.find_bindings_for_pid(pid)
             if bindings:
                 pid_to_ports[pid] = [b.port for b in bindings]
-        except (OSError, AttributeError, ValueError):  # noqa: S110 - best-effort port resolution
+        except (OSError, AttributeError, ValueError):
             pass
 
     print(colorize(f"Found {len(pids)} process(es) matching '{pname}':", Colors.YELLOW))
@@ -894,7 +893,7 @@ def handle_hold(args: argparse.Namespace, inspector: BaseInspector) -> int:
                 input()
             except (EOFError, KeyboardInterrupt):
                 pass
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - best-effort socket cleanup
         pass
     finally:
         sock.close()

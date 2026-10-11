@@ -31,7 +31,6 @@ from .cli_utils import (
     check_safety_policy,
     confirm_docker_rm,
     get_elevation_hint,
-    handle_setup_sudo,
     load_config,
     parse_port_range,
     re_exec_with_sudo,
@@ -49,7 +48,6 @@ __all__ = [
     "EXIT_GENERAL_ERROR",
     "EXIT_INVALID_INPUT",
     "EXIT_OK",
-    "warn_if_path_missing",
     "EXIT_PERMISSION",
     "EXIT_PORT_DOCKER",
     "EXIT_PORT_FREE",
@@ -66,6 +64,7 @@ __all__ = [
     "main",
     "parse_port_range",
     "validate_port",
+    "warn_if_path_missing",
 ]
 
 

@@ -106,11 +106,11 @@ def warn_if_path_missing() -> None:
     path_dirs = os.environ.get("PATH", "").split(os.pathsep)
     if local_bin not in path_dirs:
         print(
-            f"\n\033[33m⚠️  ~/.local/bin is not on your PATH — 'kport' may not be "
-            f"found in new shells.\033[0m\n"
-            f"   Add it permanently with one of:\n"
-            f"     echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc && source ~/.bashrc\n"
-            f"     echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zshrc  && source ~/.zshrc\n",
+            "\n\033[33m⚠️  ~/.local/bin is not on your PATH — 'kport' may not be "
+            "found in new shells.\033[0m\n"
+            "   Add it permanently with one of:\n"
+            "     echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc && source ~/.bashrc\n"
+            "     echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zshrc  && source ~/.zshrc\n",
             file=sys.stderr,
         )
 

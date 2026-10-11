@@ -263,7 +263,6 @@ def _escalate_kill_windows(
 class BaseInspector:
     def _clear_cache(self, ttl: float = 0.0) -> None:
         """Clear cached state. Subclasses may implement process metadata caching."""
-        pass
 
     def list_listening(self, proto: str = "tcp") -> list[PortBinding]:
         """List all active listening ports."""

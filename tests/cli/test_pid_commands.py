@@ -5,12 +5,12 @@ CLI process and PID command tests (tests/cli/test_pid_commands.py).
 from __future__ import annotations
 
 import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
-from kport.cli import EXIT_OK, EXIT_PERMISSION, EXIT_INVALID_INPUT, handle_product_command, handle_legacy_command
-from kport.inspectors.base import ProcessInfo, PortBinding
+from kport.cli import EXIT_INVALID_INPUT, EXIT_OK, EXIT_PERMISSION, handle_legacy_command, handle_product_command
+from kport.inspectors.base import ProcessInfo
 from tests.conftest import FakeInspector, _args, _binding
 
 
