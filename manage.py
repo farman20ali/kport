@@ -189,6 +189,8 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
     if args.all or args.pypi:
         pypi_args = []
+        if getattr(args, "from_release", False):
+            pypi_args.append("--from-release")
         if args.dry_run:
             pypi_args.append("--dry-run")
         pypi_ret = run_script("publish_pypi.py", pypi_args)
@@ -199,6 +201,8 @@ def cmd_publish(args: argparse.Namespace) -> int:
         snap_args = ["--publish"]
         if args.channel:
             snap_args.extend(["--channel", args.channel])
+        if getattr(args, "from_release", False):
+            snap_args.append("--from-release")
         if args.dry_run:
             snap_args.append("--dry-run")
         snap_ret = run_script("publish_snap.py", snap_args)
@@ -215,11 +219,27 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
     if args.all or args.choco:
         choco_args = ["--chocolatey"]
+        if getattr(args, "from_release", False):
+            choco_args.append("--from-release")
         if args.dry_run:
             choco_args.append("--dry-run")
         choco_ret = run_script("publish_packages.py", choco_args)
         if choco_ret != 0:
             ret = choco_ret
+
+    if args.all or getattr(args, "winget", False):
+        winget_args = ["--winget"]
+        if getattr(args, "winget_version", None):
+            winget_args.extend(["--winget-version", args.winget_version])
+        if getattr(args, "from_release", False):
+            winget_args.append("--from-release")
+        if getattr(args, "yes", False):
+            winget_args.append("--yes")
+        if args.dry_run:
+            winget_args.append("--dry-run")
+        winget_ret = run_script("publish_packages.py", winget_args)
+        if winget_ret != 0:
+            ret = winget_ret
 
     return ret
 
@@ -284,15 +304,16 @@ def interactive_menu() -> int:
         print("  11. Publish Snap package (stable)")
         print("  12. Publish Snap package (edge)")
         print("  13. Publish Chocolatey package")
+        print("  14. Publish WinGet package (Windows Package Manager)")
 
         print("\n📝 Documentation:")
-        print("  14. Regenerate README usage from --help (docs)")
-        print("  15. Check if README usage is stale (CI gate)")
+        print("  15. Regenerate README usage from --help (docs)")
+        print("  16. Check if README usage is stale (CI gate)")
 
         print("\n0. Exit")
 
         try:
-            choice = input("\nEnter choice (0-15): ").strip()
+            choice = input("\nEnter choice (0-16): ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\n👋 Goodbye!")
             return 0
@@ -323,26 +344,30 @@ def interactive_menu() -> int:
             args = argparse.Namespace(all=False, win=False, mac=False, deb=False, rpm=False, snap=True, choco=False, pypi=False, vscode=False, install_vscode=False, check=False, dry_run=False, version=None)
             cmd_build(args)
         elif choice == "8":
-            args = argparse.Namespace(all=True, pypi=False, snap=False, choco=False, vscode=False, channel=None, release_tag=None, dry_run=False)
+            args = argparse.Namespace(all=True, pypi=False, snap=False, choco=False, winget=False, vscode=False, channel=None, release_tag=None, dry_run=False, from_release=False, winget_version=None, yes=False)
             cmd_publish(args)
         elif choice == "9":
-            args = argparse.Namespace(all=False, pypi=True, snap=False, choco=False, vscode=False, channel=None, release_tag=None, dry_run=False)
+            args = argparse.Namespace(all=False, pypi=True, snap=False, choco=False, winget=False, vscode=False, channel=None, release_tag=None, dry_run=False, from_release=False, winget_version=None, yes=False)
             cmd_publish(args)
         elif choice == "10":
-            args = argparse.Namespace(all=False, pypi=False, snap=False, choco=False, vscode=True, channel=None, release_tag=None, dry_run=False)
+            args = argparse.Namespace(all=False, pypi=False, snap=False, choco=False, winget=False, vscode=True, channel=None, release_tag=None, dry_run=False, from_release=False, winget_version=None, yes=False)
             cmd_publish(args)
         elif choice == "11":
-            args = argparse.Namespace(all=False, pypi=False, snap=True, choco=False, vscode=False, channel="stable", release_tag=None, dry_run=False)
+            args = argparse.Namespace(all=False, pypi=False, snap=True, choco=False, winget=False, vscode=False, channel="stable", release_tag=None, dry_run=False, from_release=False, winget_version=None, yes=False)
             cmd_publish(args)
         elif choice == "12":
-            args = argparse.Namespace(all=False, pypi=False, snap=True, choco=False, vscode=False, channel="edge", release_tag=None, dry_run=False)
+            args = argparse.Namespace(all=False, pypi=False, snap=True, choco=False, winget=False, vscode=False, channel="edge", release_tag=None, dry_run=False, from_release=False, winget_version=None, yes=False)
             cmd_publish(args)
         elif choice == "13":
-            args = argparse.Namespace(all=False, pypi=False, snap=False, choco=True, vscode=False, channel=None, release_tag=None, dry_run=False)
+            args = argparse.Namespace(all=False, pypi=False, snap=False, choco=True, winget=False, vscode=False, channel=None, release_tag=None, dry_run=False, from_release=False, winget_version=None, yes=False)
             cmd_publish(args)
         elif choice == "14":
-            cmd_docs(check_only=False)
+            wg_ver = input("Enter WinGet version override (leave blank for current): ").strip() or None
+            args = argparse.Namespace(all=False, pypi=False, snap=False, choco=False, winget=True, vscode=False, channel=None, release_tag=None, dry_run=False, from_release=False, winget_version=wg_ver, yes=False)
+            cmd_publish(args)
         elif choice == "15":
+            cmd_docs(check_only=False)
+        elif choice == "16":
             cmd_docs(check_only=True)
         else:
             err("Invalid choice. Please choose again.")
@@ -383,6 +408,10 @@ def main() -> int:
     publish_parser.add_argument("--snap", action="store_true", help="Publish Snap package")
     publish_parser.add_argument("--vscode", action="store_true", help="Publish VS Code extension")
     publish_parser.add_argument("--choco", action="store_true", help="Publish to Chocolatey Community")
+    publish_parser.add_argument("--winget", action="store_true", help="Submit or update package in Windows Package Manager (WinGet)")
+    publish_parser.add_argument("--winget-version", help="Explicit version for WinGet package (e.g. 5.1.0 or 2.5.0)")
+    publish_parser.add_argument("--from-release", action="store_true", help="Download release artifacts from GitHub Releases before publishing")
+    publish_parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts")
     publish_parser.add_argument("--channel", choices=["stable", "candidate", "edge"], default="stable", help="Snap store target channel")
     publish_parser.add_argument("--release-tag", help="Create a local Git release tag with specified version first")
     publish_parser.add_argument("--dry-run", action="store_true", help="Preview publish command only")
@@ -417,7 +446,7 @@ def main() -> int:
         return cmd_build(args)
     elif args.command == "publish":
         # Make sure at least one publish target or flag is specified
-        if not any([args.all, args.pypi, args.snap, args.choco, args.vscode, args.release_tag]):
+        if not any([args.all, args.pypi, args.snap, args.choco, args.winget, args.vscode, args.release_tag]):
             publish_parser.print_help()
             return 1
         return cmd_publish(args)

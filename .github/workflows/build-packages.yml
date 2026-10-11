@@ -309,6 +309,48 @@ jobs:
           }
           python scripts/publish_choco.py --publish --skip-if-no-credentials
 
+  # ── 6c. Publish to Windows Package Manager (WinGet) ──────────────────────────
+  #
+  # Requires repository secret: WINGET_GITHUB_TOKEN
+  # GitHub PAT with 'public_repo' scope to fork microsoft/winget-pkgs and open PR.
+  # If the secret is not configured, the job skips publish without failing.
+  publish-winget:
+    name: "Publish to WinGet"
+    runs-on: windows-latest
+    needs: [release, build-win]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Download Windows installer artifact
+        uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: windows-installer
+          path: dist/win
+
+      - name: Install wingetcreate
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/microsoft/winget-create/releases/latest/download/wingetcreate.exe" -OutFile "$env:TEMP\wingetcreate.exe"
+          echo "$env:TEMP" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+
+      - name: Publish / Update WinGet Package
+        shell: powershell
+        env:
+          WINGET_GITHUB_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
+        run: |
+          if (-not $env:WINGET_GITHUB_TOKEN) {
+            Write-Host 'WINGET_GITHUB_TOKEN secret not configured — skipping WinGet publish'
+            exit 0
+          }
+          python scripts/publish_packages.py --winget --yes
+
   # ── 7. macOS .pkg installer ──────────────────────────────────────────────────
   build-mac:
     name: "macOS (.pkg installer)"

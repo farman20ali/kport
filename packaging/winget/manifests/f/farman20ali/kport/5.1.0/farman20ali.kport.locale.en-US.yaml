@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: farman20ali.kport
+PackageVersion: 5.1.0
+PackageLocale: en-US
+Publisher: farman20ali
+PublisherUrl: https://github.com/farman20ali
+PublisherSupportUrl: https://github.com/farman20ali/kport/issues
+PackageName: kport
+PackageUrl: https://github.com/farman20ali/kport
+License: Apache-2.0
+LicenseUrl: https://github.com/farman20ali/kport/blob/main/LICENSE
+ShortDescription: Cross-platform command-line tool to inspect and kill processes using specific ports
+Description: kport is an advanced cross-platform CLI tool and terminal dashboard for inspecting listening ports, tracing process hierarchies, and safely terminating processes.
+Moniker: kport
+Tags:
+  - port
+  - process
+  - network
+  - killer
+  - cli
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

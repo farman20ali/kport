@@ -179,24 +179,74 @@ npx ovsx publish kport-vscode-X.Y.Z.vsix -p $OVSX_PAT
 
 ---
 
-## Winget
+## Winget (Windows Package Manager)
 
-**Requires human step:** confirm the installer supports silent mode before submitting.
+### Token Setup (`WINGET_GITHUB_TOKEN`)
+To submit or update manifests directly to `microsoft/winget-pkgs`, generate a GitHub Personal Access Token (classic PAT):
+1. Navigate to: [GitHub Token Settings](https://github.com/settings/tokens/new)
+2. Note: `winget submission token`
+3. Scopes: Check `public_repo`
+4. Set the environment variable:
+   - **PowerShell:** `$env:WINGET_GITHUB_TOKEN = "ghp_..."`
+   - **CMD:** `set WINGET_GITHUB_TOKEN=ghp_...`
+   - **Bash:** `export WINGET_GITHUB_TOKEN="ghp_..."`
 
+### Silent Installation Verification
+kport uses NSIS for Windows packaging. Verify silent installation:
 ```powershell
-kport-X.Y.Z-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+kport-X.Y.Z-setup.exe /S
 ```
 
-If silent install works, scaffold and submit:
+### Publishing Commands
 
+#### 1. Automated via `manage.py`
 ```powershell
-winget install wingetcreate
-wingetcreate new https://github.com/farman20ali/kport/releases/download/vX.Y.Z/kport-X.Y.Z-setup.exe
-# Package Identifier: farman20ali.kport
-wingetcreate submit
+# Publish current version to WinGet
+python manage.py publish --winget
+
+# Publish specific version override
+python manage.py publish --winget --winget-version 5.1.0
+
+# Using live GitHub Release assets
+python manage.py publish --winget --from-release
 ```
 
-A PR is opened against `microsoft/winget-pkgs`. Expect a few days for automated + human review.
+#### 2. First-Time Package Submission (v5.1.0)
+Because `farman20ali.kport` is submitted for the first time, `microsoft/winget-pkgs` does not have an existing package for `wingetcreate update` to modify. Use the first-time onboarding flow:
+```powershell
+# Auto-generate validated manifests and submit PR:
+python scripts/publish_winget.py --publish --first-time
+
+# Or directly submit generated manifest directory:
+wingetcreate submit dist/winget/manifests/f/farman20ali/kport/5.1.0 --token $env:WINGET_GITHUB_TOKEN
+```
+
+#### 3. Subsequent Updates (Next Time)
+Once the first PR is accepted and merged into `microsoft/winget-pkgs`, subsequent versions are fully automated:
+```powershell
+python scripts/publish_packages.py --winget
+# or: wingetcreate update farman20ali.kport --version 5.2.0 --urls "https://github.com/farman20ali/kport/releases/download/v5.2.0/kport-5.2.0-setup.exe" --submit --token $env:WINGET_GITHUB_TOKEN
+```
+
+A PR is opened against `microsoft/winget-pkgs`. Automated validation tests run, followed by human review.
+
+---
+
+### Downloading Artifacts from GitHub Releases (`--from-release`)
+Just like Chocolatey, you can pull artifacts directly from GitHub Releases to publish without needing local builds:
+```powershell
+# PyPI: downloads .whl and .tar.gz from GitHub Release and uploads via twine
+python manage.py publish --pypi --from-release
+
+# Snap Store: downloads .snap from GitHub Release and uploads via snapcraft
+python manage.py publish --snap --from-release
+
+# Chocolatey: rebuilds from live release checksum and pushes to Chocolatey
+python manage.py publish --choco --from-release
+
+# WinGet: computes live checksum from release installer and submits manifest PR
+python manage.py publish --winget --from-release
+```
 
 ---
 

@@ -21,6 +21,7 @@ Requirements:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -63,6 +64,23 @@ def warn(msg: str) -> None:
 def info(msg: str) -> None:
     """Print info message"""
     print(_c(f"ℹ️  {msg}", "94"))
+
+
+def read_version() -> str:
+    """Read version from pyproject.toml."""
+    for candidate in [
+        REPO_ROOT / "pyproject.toml",
+        REPO_ROOT / "src" / "kport" / "__init__.py",
+    ]:
+        if candidate.exists():
+            text = candidate.read_text(encoding="utf-8", errors="ignore")
+            m = re.search(
+                r"""(?:^version\s*=\s*["']|__version__\s*=\s*["'])([^"']+)""",
+                text, re.MULTILINE,
+            )
+            if m:
+                return m.group(1).strip()
+    return "0.0.0"
 
 
 def run_cmd(cmd: str, description: str, check: bool = True) -> int:
@@ -168,17 +186,78 @@ def check_requirements() -> bool:
     return all_ok
 
 
-def publish_snap(channel: str = "stable", dry_run: bool = False) -> int:
+def download_snap_from_release(version: str, dest_dir: Path) -> Path:
+    """Download .snap package from GitHub release."""
+    import json
+    import urllib.request
+    tag = f"v{version}"
+    api_url = f"https://api.github.com/repos/farman20ali/kport/releases/tags/{tag}"
+    info(f"Querying GitHub Release {tag} for .snap package…")
+    filename = f"kport_{version}_amd64.snap"
+    download_url = f"https://github.com/farman20ali/kport/releases/download/{tag}/{filename}"
+    total_size = 0
+
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "kport-snap-publish/1.0", "Accept": "application/vnd.github+json"})
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        assets = data.get("assets", [])
+        snaps = [a for a in assets if ".snap" in a["name"]]
+        if snaps:
+            filename = snaps[0]["name"]
+            download_url = snaps[0]["browser_download_url"]
+            total_size = snaps[0].get("size", 0)
+    except Exception as exc:  # noqa: BLE001
+        warn(f"GitHub API note: {exc}. Using direct release URL fallback.")
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_file = dest_dir / filename
+    info(f"Downloading {filename} from {download_url}…")
+    req = urllib.request.Request(download_url, headers={"User-Agent": "kport-snap-publish/1.0"})
+    with urllib.request.urlopen(req, timeout=120) as resp, open(dest_file, "wb") as fh:
+        total = int(resp.headers.get("Content-Length", total_size or 0))
+        downloaded = 0
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            fh.write(chunk)
+            downloaded += len(chunk)
+            pct = int(downloaded * 100 / total) if total else 0
+            print(f"\r  Downloading … {pct:3d}% ({downloaded // 1024:,} KB)", end="", flush=True)
+    print()
+    ok(f"Downloaded snap: {dest_file.name}")
+    return dest_file
+
+
+def publish_snap(
+    channel: str = "stable",
+    dry_run: bool = False,
+    snap_file: Path | None = None,
+    from_release: bool = False,
+    version: str | None = None,
+) -> int:
     """Publish snap to the Snap Store"""
-    snap_file = find_snap_file()
+    if from_release:
+        v = version or read_version()
+        try:
+            snap_file = download_snap_from_release(v, DIST_SNAP / "from-release")
+        except Exception as exc:  # noqa: BLE001
+            err(f"Failed to download .snap from release: {exc}")
+            return 1
+    elif snap_file is None:
+        snap_file = find_snap_file()
     
-    if not snap_file:
+    if not snap_file or not snap_file.exists():
         err(f"No snap file found in {DIST_SNAP}")
-        warn("Run: python scripts/build_snap.py --build")
+        warn("Run: python scripts/build_snap.py --build, or specify --from-release")
         return 1
     
-    version = get_snap_version(snap_file)
-    info(f"Publishing {snap_file.name} to '{channel}' channel")
+    ver = get_snap_version(snap_file)
+    info(f"Publishing {snap_file.name} (v{ver}) to '{channel}' channel")
     
     # Check authentication
     if not check_snapcraft_authenticated():
@@ -193,7 +272,7 @@ def publish_snap(channel: str = "stable", dry_run: bool = False) -> int:
         print(f"\n[DRY-RUN] Would execute:\n$ {cmd}")
         return 0
     
-    rc = run_cmd(cmd, f"Publishing snap v{version} to {channel} channel", check=True)
+    rc = run_cmd(cmd, f"Publishing snap v{ver} to {channel} channel", check=True)
 
     if rc == 0:
         # Push listing metadata (summary, description, icon) to the store
@@ -294,6 +373,20 @@ def main() -> int:
         help="Show what would happen without doing it"
     )
     
+    parser.add_argument(
+        "--from-release",
+        action="store_true",
+        help="Download .snap package from GitHub Release instead of local dist/snap",
+    )
+    parser.add_argument(
+        "--file",
+        help="Explicit path to .snap package file",
+    )
+    parser.add_argument(
+        "--version",
+        help="Override version string when fetching from release",
+    )
+    
     args = parser.parse_args()
     
     # Interactive mode if no args
@@ -309,7 +402,14 @@ def main() -> int:
         return login_snapcraft(dry_run=args.dry_run)
     
     if args.publish:
-        return publish_snap(channel=args.channel, dry_run=args.dry_run)
+        snap_path = Path(args.file) if args.file else None
+        return publish_snap(
+            channel=args.channel,
+            dry_run=args.dry_run,
+            snap_file=snap_path,
+            from_release=args.from_release,
+            version=args.version,
+        )
     
     return 0
 
