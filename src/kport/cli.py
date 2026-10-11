@@ -6,6 +6,7 @@ Parses options, handles configs, and delegates logic to backend components.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from . import __version__
@@ -21,6 +22,7 @@ from .cli_commands import (
 )
 from .cli_utils import (
     EXIT_GENERAL_ERROR,
+    EXIT_INTERRUPTED,
     EXIT_INVALID_INPUT,
     EXIT_OK,
     EXIT_PERMISSION,
@@ -46,6 +48,7 @@ __all__ = [
     "DEFAULT_PROTECTED_PORTS",
     "DEFAULT_PROTECTED_PROCESS_NAMES",
     "EXIT_GENERAL_ERROR",
+    "EXIT_INTERRUPTED",
     "EXIT_INVALID_INPUT",
     "EXIT_OK",
     "EXIT_PERMISSION",
@@ -69,9 +72,24 @@ __all__ = [
 
 
 class _QuietParser(argparse.ArgumentParser):
+    _raw_argv: list[str] | None = None
+
     def error(self, message: str) -> None:
-        print(colorize(f"Error: {message}", Colors.RED), file=sys.stderr)
-        print("Run 'kport --help' for usage.", file=sys.stderr)
+        raw = self._raw_argv if self._raw_argv is not None else sys.argv[1:]
+        if "--json" in raw:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": None,
+                    "error": {
+                        "code": "invalid_arguments",
+                        "message": message,
+                    },
+                })
+            )
+        else:
+            print(colorize(f"Error: {message}", Colors.RED), file=sys.stderr)
+            print("Run 'kport --help' for usage.", file=sys.stderr)
         sys.exit(EXIT_INVALID_INPUT)
 
 
@@ -462,41 +480,48 @@ Examples:
         help="Number of recent entries to show (default: 20)",
     )
 
-    args = parser.parse_args(argv)
-
-    if getattr(args, "mcp", False):
-        try:
-            from .mcp_server import run_mcp_server
-
-            run_mcp_server()
-            return EXIT_OK
-        except ImportError:
-            print(
-                colorize("Error: MCP server module not available.", Colors.RED),
-                file=sys.stderr,
-            )
-            return EXIT_GENERAL_ERROR
-        except Exception as e:  # noqa: BLE001 - top-level MCP server error handler
-            print(colorize(f"MCP server error: {e}", Colors.RED), file=sys.stderr)
-            return EXIT_GENERAL_ERROR
-
-    # Load configuration
-    cfg = load_config(
-        getattr(args, "config", None), debug=getattr(args, "debug", False)
-    )
-    apply_config_defaults(args, cfg)
-
-    inspector = get_inspector()
-
-    if (
-        getattr(args, "interactive", False)
-        or getattr(args, "command", None) == "interactive"
-    ):
-        from .interactive import run_interactive_picker
-
-        return run_interactive_picker(inspector, args)
+    parser._raw_argv = argv
+    args: argparse.Namespace | None = None
+    raw_args = argv if argv is not None else sys.argv[1:]
+    is_json = "--json" in raw_args
 
     try:
+        args = parser.parse_args(argv)
+        is_json = getattr(args, "json", False)
+
+        if getattr(args, "mcp", False):
+            try:
+                from .mcp_server import run_mcp_server
+
+                run_mcp_server()
+                return EXIT_OK
+            except ImportError:
+                print(
+                    colorize("Error: MCP server module not available.", Colors.RED),
+                    file=sys.stderr,
+                )
+                return EXIT_GENERAL_ERROR
+            except Exception as e:  # noqa: BLE001 - top-level MCP server error handler
+                print(colorize(f"MCP server error: {e}", Colors.RED), file=sys.stderr)
+                return EXIT_GENERAL_ERROR
+
+        # Load configuration
+        cfg = load_config(
+            getattr(args, "config", None), debug=getattr(args, "debug", False)
+        )
+        apply_config_defaults(args, cfg)
+
+        inspector = get_inspector()
+
+        # 0. Interactive TUI — kept inside the unified try/except so Ctrl+C is handled cleanly
+        if (
+            getattr(args, "interactive", False)
+            or getattr(args, "command", None) == "interactive"
+        ):
+            from .interactive import run_interactive_picker
+
+            return run_interactive_picker(inspector, args)
+
         # 1. Product subcommands routing
         if getattr(args, "command", None):
             return handle_product_command(args, inspector)
@@ -522,42 +547,94 @@ Examples:
         # 2. Legacy flag execution routing
         return handle_legacy_command(args, inspector)
 
-    # Catch custom domain exceptions cleanly
+    # Catch custom domain exceptions cleanly without leaking internal code
     except InvalidPortError as e:
-        print(colorize(f"Error: {e}", Colors.RED), file=sys.stderr)
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {"code": "invalid_port", "message": str(e)},
+                })
+            )
+        else:
+            print(colorize(f"Error: {e}", Colors.RED), file=sys.stderr)
         return EXIT_INVALID_INPUT
     except PermissionDeniedError as e:
         hint = get_elevation_hint()
-        print(
-            colorize(
-                f"Permission denied: {e}\n\n{hint}",
-                Colors.RED,
-            ),
-            file=sys.stderr,
-        )
-        if sys.platform != "win32" and sys.stdin.isatty():
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {"code": "permission_denied", "message": str(e)},
+                })
+            )
+        else:
+            print(colorize(f"Permission denied: {e}\n\n{hint}", Colors.RED), file=sys.stderr)
+        if not is_json and sys.platform != "win32" and sys.stdin.isatty():
             return re_exec_with_sudo()
         return EXIT_PERMISSION
     except KPortError as e:
-        print(colorize(f"kport error: {e}", Colors.RED), file=sys.stderr)
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {"code": "kport_error", "message": str(e)},
+                })
+            )
+        else:
+            print(colorize(f"kport error: {e}", Colors.RED), file=sys.stderr)
         return EXIT_GENERAL_ERROR
-    except PermissionError:
+    except PermissionError as e:
         hint = get_elevation_hint()
-        print(
-            colorize(
-                f"Permission denied.\n\n{hint}",
-                Colors.RED,
-            ),
-            file=sys.stderr,
-        )
-        if sys.platform != "win32" and sys.stdin.isatty():
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {
+                        "code": "permission_denied",
+                        "message": str(e) or "Insufficient privileges",
+                    },
+                })
+            )
+        else:
+            print(colorize(f"Permission denied.\n\n{hint}", Colors.RED), file=sys.stderr)
+        if not is_json and sys.platform != "win32" and sys.stdin.isatty():
             return re_exec_with_sudo()
         return EXIT_PERMISSION
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user.")
-        return EXIT_GENERAL_ERROR
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {
+                        "code": "interrupted",
+                        "message": "Operation cancelled by user",
+                    },
+                })
+            )
+        else:
+            print(colorize("\nInterrupted.", Colors.YELLOW), file=sys.stderr)
+        return EXIT_INTERRUPTED
     except Exception as e:  # noqa: BLE001 - main entry point catch-all
-        print(colorize(f"Unexpected error: {e}", Colors.RED), file=sys.stderr)
+        if is_json:
+            print(
+                json.dumps({
+                    "schema_version": 1,
+                    "command": getattr(args, "command", None) if args else None,
+                    "error": {"code": "unexpected_error", "message": str(e)},
+                })
+            )
+        else:
+            print(colorize(f"Unexpected error: {e}", Colors.RED), file=sys.stderr)
+            if getattr(args, "debug", False) or "--debug" in raw_args:
+                import traceback
+
+                traceback.print_exc()
         return EXIT_GENERAL_ERROR
 
 

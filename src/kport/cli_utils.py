@@ -44,6 +44,7 @@ EXIT_INVALID_INPUT = 2
 EXIT_PERMISSION = 3
 EXIT_PORT_DOCKER = 4
 EXIT_PORT_FREE = 5
+EXIT_INTERRUPTED = 130
 
 # JSON schema version for --json output envelope
 JSON_SCHEMA_VERSION = 1
@@ -201,7 +202,7 @@ def re_exec_with_sudo(argv: list[str] | None = None, *, assume_yes: bool = False
                 )
             ).strip().lower()
         except (KeyboardInterrupt, EOFError):
-            print()
+            print(colorize("\nEscalation cancelled.", Colors.YELLOW))
             return EXIT_GENERAL_ERROR
         if resp not in ("y", "yes"):
             print(colorize("Escalation declined.", Colors.YELLOW))
@@ -361,8 +362,8 @@ def parse_port_range(port_range: str, max_ports: int = 1000) -> list[int]:
             port = int(port_range.strip())
             validate_port(port)
             return [port]
-    except ValueError:
-        raise InvalidPortError(f"Invalid port or range format: {port_range}")
+    except ValueError as e:
+        raise InvalidPortError(f"Invalid port or range format: {port_range}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -499,8 +500,12 @@ def check_safety_policy(
     )
 
     if bypass and not decision.allowed:
-        # Should not normally happen, but guard anyway.
-        pass
+        # Should not normally happen — bypass is applied inside the core policy.
+        # Log at debug level so it is never silently swallowed.
+        debug_log(
+            getattr(args, "debug", False),
+            f"[safety] bypass=True but decision.allowed=False (port={port}, pids={pids}): {decision.reason}",
+        )
     elif bypass and decision.allowed and decision.policy_source == "bypass":
         debug_log(
             getattr(args, "debug", False),
@@ -580,7 +585,7 @@ def confirm_docker_rm(
         print(colorize("Aborted.", Colors.YELLOW))
         return False
     except KeyboardInterrupt:
-        print()
+        print(colorize("\nAborted.", Colors.YELLOW))
         raise
 
 

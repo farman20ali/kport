@@ -292,8 +292,12 @@ def handle_stop_service(args: argparse.Namespace, inspector: BaseInspector) -> i
     # 4. Confirmation Prompt
     if not args.json:
         prompt_msg = f"Stop service '{service_name}' via {manager}?"
-        if not confirm_prompt(prompt_msg, assume_yes=args.yes):
-            print(colorize("Operation cancelled.", Colors.YELLOW))
+        try:
+            if not confirm_prompt(prompt_msg, assume_yes=args.yes):
+                print(colorize("Operation cancelled.", Colors.YELLOW))
+                return EXIT_GENERAL_ERROR
+        except KeyboardInterrupt:
+            print(colorize("\nInterrupted.", Colors.YELLOW), file=sys.stderr)
             return EXIT_GENERAL_ERROR
 
     # 5. Execute action via service_actions domain layer
@@ -885,8 +889,11 @@ def handle_hold(args: argparse.Namespace, inspector: BaseInspector) -> int:
         if timeout:
             start_time = time.time()
             while time.time() - start_time < timeout:
-                if sys.stdin in select.select([sys.stdin], [], [], 0.2)[0]:
-                    sys.stdin.readline()
+                try:
+                    if sys.stdin in select.select([sys.stdin], [], [], 0.2)[0]:
+                        sys.stdin.readline()
+                        break
+                except KeyboardInterrupt:
                     break
         else:
             try:
@@ -897,7 +904,7 @@ def handle_hold(args: argparse.Namespace, inspector: BaseInspector) -> int:
         pass
     finally:
         sock.close()
-        print(colorize(f"🔓 Port {port} released.", Colors.GREEN))
+        print(colorize(f"\n🔓 Port {port} released.", Colors.GREEN))
 
     return EXIT_OK
 
@@ -2072,8 +2079,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
     if args.list:
         bindings = inspector.list_listening(proto=getattr(args, "proto", "tcp"))
         if args.json:
-            from dataclasses import asdict as _asdict
-            print(_json_out("list", {"bindings": [_asdict(b) for b in bindings]}))
+            print(_json_out("list", {"bindings": [asdict(b) for b in bindings]}))
         else:
             print(colorize("\n📋 Listening ports\n", Colors.CYAN + Colors.BOLD))
             print_table_listen(bindings)
@@ -2140,6 +2146,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                     print(_json_out("inspect", {"port": args.inspect, "pids": []}))
                 else:
                     print(colorize("❌ " + msg, Colors.RED))
+                return EXIT_PORT_FREE
         else:
             info_list = []
             for pid in pids:
@@ -2698,6 +2705,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                             Colors.RED,
                         )
                     )
+                return EXIT_PORT_FREE
         else:
             if args.json:
                 ok, msg = inspector.kill_port(
