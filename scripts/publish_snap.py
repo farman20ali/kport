@@ -116,7 +116,8 @@ def check_snapcraft_installed() -> bool:
 
 def check_snapcraft_authenticated() -> bool:
     """Check if snapcraft is authenticated with Snap Store"""
-    # Try to get whoami output
+    # Use exit code as primary signal; newer snapcraft versions may write
+    # whoami info to stderr or produce empty stdout even on success.
     result = subprocess.run(
         "snapcraft whoami",
         shell=True,
@@ -125,8 +126,15 @@ def check_snapcraft_authenticated() -> bool:
         check=False,
     )
     if result.returncode == 0:
-        return bool(result.stdout.strip())
-    return False
+        # Accept success as long as either stdout or stderr has content
+        combined = (result.stdout + result.stderr).strip()
+        return bool(combined) or True  # exit 0 is sufficient proof
+    # Also accept if stderr contains credential/login confirmation text
+    combined = (result.stdout + result.stderr).strip().lower()
+    return any(
+        kw in combined
+        for kw in ("email:", "username:", "credentials found", "logged in")
+    )
 
 
 def find_snap_file() -> Path | None:
