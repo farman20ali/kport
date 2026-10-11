@@ -11,7 +11,7 @@
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <projectSourceUrl>https://github.com/farman20ali/port-killer/tree/main/src/kport</projectSourceUrl>
     <packageSourceUrl>https://github.com/farman20ali/port-killer/tree/main/packaging/chocolatey</packageSourceUrl>
-    <iconUrl>https://raw.githubusercontent.com/farman20ali/port-killer/main/assets/icons/icon_128_128.png</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/farman20ali/port-killer@v{VERSION}/assets/icons/icon_128_128.png</iconUrl>
     <docsUrl>https://github.com/farman20ali/port-killer/blob/main/README.md</docsUrl>
     <bugTrackerUrl>https://github.com/farman20ali/port-killer/issues</bugTrackerUrl>
     <summary>Cross-platform CLI to inspect and free ports used by local processes or Docker.</summary>
