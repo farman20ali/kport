@@ -17,7 +17,7 @@ Unicode True
 
 ; ---- Version (overridden by win_build.py via /DVERSION=x.y.z) ----
 !ifndef VERSION
-  !define VERSION "5.1.0"
+  !define VERSION "5.2.0"
 !endif
 !ifndef OUTFILE
   !define OUTFILE "..\..\dist\win\kport-${VERSION}-setup.exe"

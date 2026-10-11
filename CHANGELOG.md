@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.2.0] - 2026-10-11
+
+### Added
+- **WinGet Package Manager Support**: Full `wingetcreate`-based publishing pipeline for Windows Package Manager.
+  - First-time package submission via `wingetcreate submit` for `farman20ali.kport` initial onboarding PR.
+  - Subsequent version updates via `wingetcreate update` (no manifest files needed in repo for updates).
+  - Validated multi-file manifests committed to `packaging/winget/manifests/f/farman20ali/kport/5.1.0/`.
+  - Singleton manifest template (`packaging/winget/kport.yaml.template`) and three multi-file templates.
+  - `scripts/publish_winget.py` with auto-detect first-time vs update, SHA-256 from GitHub Release, `winget validate`, interactive menu, and CI flags (`--publish`, `--dry-run`, `--manifest-only`, `--validate`, `--first-time`).
+  - `manage.py publish --winget` and `manage.py publish --winget --winget-version X.Y.Z` support.
+- **Packaging Scripts Overhaul** (`scripts/publish_packages.py`):
+  - Unified `--from-release` flag: downloads artifacts (`.whl`, `.tar.gz`, `.snap`, `.exe`) from GitHub Releases for Chocolatey, PyPI, Snap, and WinGet without requiring a local build.
+  - `--winget`, `--winget-version` CLI flags added to `publish_packages.py` and `manage.py`.
+- **Snap Publishing Script** (`scripts/publish_snap.py`): Full snap build and `snapcraft upload` automation with `--from-release` artifact download support.
+- **Test Infrastructure Hardening**:
+  - 335 tests across CLI, MCP, TUI, unit, and packaging layers (up from ~240).
+  - New test suites: `tests/packaging/test_publish_winget.py`, `tests/tui/test_tui_diagnose.py`, `tests/unit/test_enrichment.py`, `tests/unit/test_connections.py`, and 15+ other new test modules.
+  - `conftest.py` psutil stub now includes `psutil.Error` base exception and properly defaulted `Process` mock (fixes CI on Linux without psutil installed).
+- **GitHub Actions CI** (`.github/workflows/build-packages.yml`): Added packaging build and test pipeline covering Windows, Linux (x64), and macOS.
+
+### Fixed
+- **WinGet manifest `kport.yaml.template` missing** on CI after previous commit deleted the file — `render_manifests()` now falls back to embedded default templates, so manifest generation never fails even in minimal checkouts.
+- **`psutil.Error` `AttributeError` on Linux CI**: When psutil is not installed and the stub module is used, `except psutil.Error` clauses in `psutil_impl.py` previously raised `AttributeError`. Fixed by adding `psutil.Error = Exception` guard in the module and adding `stub.Error` to the test stub.
+- **`test_psutil_inspector_enrichment` mock assertion failure**: Stub `psutil.Process` returned unconfigured `MagicMock` for `ppid()`. Fixed by giving the stub's `Process` side-effect realistic defaults (`os.getppid()`, `os.getcwd()`, etc.).
+- **Curses wrapper tests fail on Windows CI** (`ModuleNotFoundError: No module named '_curses'`): `TestCursesWrapperExceptionHandling` tests now skip on platforms where `_curses` is unavailable via `pytest.importorskip("_curses")`.
+- **Repo rename `port-killer` → `kport`**: Updated all remaining references across workflow files, packaging configs, docs, and scripts.
+
+### Changed
+- **WinGet update flow** (v5.2.0 onwards): Subsequent releases no longer require committing new manifest files to the repo. `wingetcreate update farman20ali.kport --version X.Y.Z --urls <installer_url> --submit --token <TOKEN>` handles everything automatically. Only the initial first-time submission manifests remain in `packaging/winget/manifests/`.
+- **`publish_winget.py` `render_manifests()`**: Changed from raising `FileNotFoundError` when template is missing to falling back to hardcoded default templates, allowing the script to run on any clean checkout.
+
+---
+
 ## [5.1.0] - 2026-09-10
 
 ### Added

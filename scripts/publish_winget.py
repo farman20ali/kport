@@ -3,11 +3,21 @@
 
 Handles initial submission and updates to microsoft/winget-pkgs via wingetcreate.
 
+┌─ HOW WINGET PUBLISHING WORKS (READ THIS FIRST) ──────────────────────────
+│  First-time (v5.1.0 — already done!):
+│    wingetcreate submit <manifest-dir>    ← opens onboarding PR (done once only)
+│
+│  Every future release (v5.2.0+):
+│    wingetcreate update farman20ali.kport \
+│      --version X.Y.Z --urls <installer_url> --submit
+│    NO manifest YAML files need to be created or committed to this repo.
+└───────────────────────────────────────────────────────────────────────
+
 Usage (automated / CI):
     python scripts/publish_winget.py --check                          # Verify prerequisites & tokens
     python scripts/publish_winget.py --publish                        # Submit or update package
-    python scripts/publish_winget.py --publish --version 5.1.0        # Publish specific version
-    python scripts/publish_winget.py --publish --first-time           # Initial package onboarding PR
+    python scripts/publish_winget.py --publish --version 5.2.0        # Publish specific version
+    python scripts/publish_winget.py --publish --first-time           # ONLY for initial onboarding (done)
     python scripts/publish_winget.py --manifest-only                  # Generate manifests without submitting
     python scripts/publish_winget.py --validate                       # Validate generated manifests
     python scripts/publish_winget.py --dry-run                        # Preview execution without submitting
