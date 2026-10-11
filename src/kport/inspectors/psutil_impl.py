@@ -9,6 +9,10 @@ import os
 
 import psutil  # Safe to import because this implementation is dynamically loaded only when psutil is active.
 
+# Ensure psutil.Error base exception exists even under mock/stub environments
+if not hasattr(psutil, "Error"):
+    psutil.Error = Exception  # type: ignore[attr-defined]
+
 from .base import BaseInspector, ConnectionInfo, PortBinding, ProcessInfo
 
 

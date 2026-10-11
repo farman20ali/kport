@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: farman20ali.kport
+PackageVersion: {version}
+InstallerType: nullsoft
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/farman20ali/kport/releases/download/v{version}/kport-{version}-setup.exe
+    InstallerSha256: {sha256}
+    InstallerSwitches:
+      Silent: /S
+      SilentWithProgress: /S
+ManifestType: installer
+ManifestVersion: 1.6.0

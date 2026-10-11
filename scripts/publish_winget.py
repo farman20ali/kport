@@ -300,6 +300,78 @@ def resolve_sha256(version: str, installer_path: str | None = None, dry_run: boo
 
 # ── Manifest Generation & Validation ──────────────────────────────────────────
 
+DEFAULT_SINGLETON_TEMPLATE = """# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+PackageIdentifier: farman20ali.kport
+PackageVersion: {version}
+PackageLocale: en-US
+PackageName: kport
+Publisher: farman20ali
+License: Apache-2.0
+ShortDescription: Cross-platform port inspector and killer
+Installers:
+  - Architecture: x64
+    InstallerType: nullsoft
+    InstallerUrl: https://github.com/farman20ali/kport/releases/download/v{version}/kport-{version}-setup.exe
+    InstallerSha256: {sha256}
+    InstallerSwitches:
+      Silent: /S
+      SilentWithProgress: /S
+ManifestType: singleton
+ManifestVersion: 1.6.0
+"""
+
+DEFAULT_VERSION_TEMPLATE = """# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
+PackageIdentifier: farman20ali.kport
+PackageVersion: {version}
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0
+"""
+
+DEFAULT_INSTALLER_TEMPLATE = """# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: farman20ali.kport
+PackageVersion: {version}
+InstallerType: nullsoft
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/farman20ali/kport/releases/download/v{version}/kport-{version}-setup.exe
+    InstallerSha256: {sha256}
+    InstallerSwitches:
+      Silent: /S
+      SilentWithProgress: /S
+ManifestType: installer
+ManifestVersion: 1.6.0
+"""
+
+DEFAULT_LOCALE_TEMPLATE = """# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: farman20ali.kport
+PackageVersion: {version}
+PackageLocale: en-US
+Publisher: farman20ali
+PublisherUrl: https://github.com/farman20ali
+PublisherSupportUrl: https://github.com/farman20ali/kport/issues
+PackageName: kport
+PackageUrl: https://github.com/farman20ali/kport
+License: Apache-2.0
+LicenseUrl: https://github.com/farman20ali/kport/blob/main/LICENSE
+ShortDescription: Cross-platform CLI and TUI port inspector and killer
+Description: |
+  kport is a fast, cross-platform CLI and interactive terminal utility to inspect,
+  identify, and kill processes occupying network ports on Linux, macOS, and Windows.
+Moniker: kport
+Tags:
+  - port
+  - process
+  - kill
+  - network
+  - cli
+  - developer-tools
+ReleaseNotesUrl: https://github.com/farman20ali/kport/releases/tag/v{version}
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
+"""
+
+
 def render_manifests(version: str, sha256_val: str) -> tuple[Path, Path]:
     """Render singleton and multi-file WinGet manifests into dist/winget/.
 
@@ -309,12 +381,13 @@ def render_manifests(version: str, sha256_val: str) -> tuple[Path, Path]:
 
     # 1. Singleton manifest: dist/winget/farman20ali.kport.yaml
     singleton_template = WINGET_DIR / "kport.yaml.template"
-    if not singleton_template.exists():
-        raise FileNotFoundError(f"Missing template: {singleton_template}")
+    if singleton_template.exists():
+        raw_singleton = singleton_template.read_text(encoding="utf-8")
+    else:
+        raw_singleton = DEFAULT_SINGLETON_TEMPLATE
+
     singleton_content = (
-        singleton_template.read_text(encoding="utf-8")
-        .replace("{version}", version)
-        .replace("{sha256}", sha256_val)
+        raw_singleton.replace("{version}", version).replace("{sha256}", sha256_val)
     )
     singleton_file = DIST_WINGET / f"{PACKAGE_ID}.yaml"
     singleton_file.write_text(singleton_content, encoding="utf-8")
@@ -330,21 +403,24 @@ def render_manifests(version: str, sha256_val: str) -> tuple[Path, Path]:
     repo_singleton_file.write_text(singleton_content, encoding="utf-8")
 
     templates = [
-        ("farman20ali.kport.yaml.template", f"{PACKAGE_ID}.yaml"),
-        ("farman20ali.kport.installer.yaml.template", f"{PACKAGE_ID}.installer.yaml"),
-        ("farman20ali.kport.locale.en-US.yaml.template", f"{PACKAGE_ID}.locale.en-US.yaml"),
+        ("farman20ali.kport.yaml.template", f"{PACKAGE_ID}.yaml", DEFAULT_VERSION_TEMPLATE),
+        ("farman20ali.kport.installer.yaml.template", f"{PACKAGE_ID}.installer.yaml", DEFAULT_INSTALLER_TEMPLATE),
+        ("farman20ali.kport.locale.en-US.yaml.template", f"{PACKAGE_ID}.locale.en-US.yaml", DEFAULT_LOCALE_TEMPLATE),
     ]
 
-    for tmpl_name, out_name in templates:
+    for tmpl_name, out_name, fallback_tmpl in templates:
         tmpl_path = WINGET_DIR / tmpl_name
         if tmpl_path.exists():
-            content = (
-                tmpl_path.read_text(encoding="utf-8")
-                .replace("{version}", version)
-                .replace("{sha256}", sha256_val)
-            )
-            (multi_dir / out_name).write_text(content, encoding="utf-8")
-            (repo_multi_dir / out_name).write_text(content, encoding="utf-8")
+            tmpl_str = tmpl_path.read_text(encoding="utf-8")
+        else:
+            tmpl_str = fallback_tmpl
+
+        content = (
+            tmpl_str.replace("{version}", version)
+            .replace("{sha256}", sha256_val)
+        )
+        (multi_dir / out_name).write_text(content, encoding="utf-8")
+        (repo_multi_dir / out_name).write_text(content, encoding="utf-8")
 
     return singleton_file, multi_dir
 

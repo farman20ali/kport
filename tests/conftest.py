@@ -16,6 +16,7 @@ patch the individual attributes they need (e.g. ``psutil.Process``,
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from unittest.mock import MagicMock
@@ -24,19 +25,35 @@ from unittest.mock import MagicMock
 def _make_psutil_stub() -> types.ModuleType:
     """Return a minimal fake psutil module that satisfies psutil_impl imports."""
     stub = types.ModuleType("psutil")
+    stub._is_stub = True
 
     # Constants referenced by psutil_impl
     stub.CONN_LISTEN = "LISTEN"
     stub.STATUS_ZOMBIE = "zombie"
 
-    # Exception types referenced by psutil_impl
-    stub.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
-    stub.AccessDenied = type("AccessDenied", (Exception,), {})
-    stub.ZombieProcess = type("ZombieProcess", (Exception,), {})
+    # Base and specific exception types
+    stub.Error = type("Error", (Exception,), {})
+    stub.NoSuchProcess = type("NoSuchProcess", (stub.Error,), {})
+    stub.AccessDenied = type("AccessDenied", (stub.Error,), {})
+    stub.ZombieProcess = type("ZombieProcess", (stub.Error,), {})
+    stub.TimeoutExpired = type("TimeoutExpired", (stub.Error,), {})
 
     # Callable stubs – individual tests override these via patch()
     stub.net_connections = MagicMock(return_value=[])
-    stub.Process = MagicMock()
+
+    def _default_process(pid=None):
+        proc = MagicMock()
+        proc.pid = pid if pid is not None else os.getpid()
+        proc.name.return_value = "python"
+        proc.exe.return_value = sys.executable
+        proc.cmdline.return_value = [sys.executable]
+        proc.username.return_value = "user"
+        proc.ppid.return_value = os.getppid()
+        proc.cwd.return_value = os.getcwd()
+        proc.create_time.return_value = 1700000000.0
+        return proc
+
+    stub.Process = MagicMock(side_effect=_default_process)
     stub.process_iter = MagicMock(return_value=iter([]))
 
     return stub

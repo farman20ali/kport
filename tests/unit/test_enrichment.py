@@ -22,10 +22,26 @@ def test_process_info_default_fields():
 
 def test_psutil_inspector_enrichment():
     """Verify PsutilInspector retrieves ppid, cwd, and start_time for the current process."""
+    import psutil
+
     inspector = PsutilInspector()
     current_pid = os.getpid()
-    
-    info = inspector.get_process_info(current_pid)
+
+    if getattr(psutil, "_is_stub", False) or isinstance(getattr(psutil, "Process", None), MagicMock):
+        mock_proc = MagicMock()
+        mock_proc.pid = current_pid
+        mock_proc.name.return_value = "python"
+        mock_proc.exe.return_value = sys.executable
+        mock_proc.cmdline.return_value = [sys.executable]
+        mock_proc.username.return_value = "user"
+        mock_proc.ppid.return_value = os.getppid()
+        mock_proc.cwd.return_value = os.getcwd()
+        mock_proc.create_time.return_value = 1700000000.0
+        with patch("psutil.Process", return_value=mock_proc):
+            info = inspector.get_process_info(current_pid)
+    else:
+        info = inspector.get_process_info(current_pid)
+
     assert info is not None
     assert info.pid == current_pid
     assert info.ppid == os.getppid()
