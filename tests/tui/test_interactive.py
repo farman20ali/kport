@@ -188,6 +188,7 @@ class TestCursesWrapperExceptionHandling:
     """Tests for curses.wrapper exception and interruption boundaries."""
 
     def test_keyboard_interrupt_exits_gracefully_with_zero(self):
+        pytest.importorskip("_curses")
         inspector = FakeInspector()
         args = _args(command="interactive")
 
@@ -203,6 +204,7 @@ class TestCursesWrapperExceptionHandling:
         mock_fallback.assert_not_called()
 
     def test_generic_exception_triggers_fallback_menu(self):
+        pytest.importorskip("_curses")
         inspector = FakeInspector()
         args = _args(command="interactive")
 
