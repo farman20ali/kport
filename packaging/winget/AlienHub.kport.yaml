@@ -1,9 +1,9 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
-PackageIdentifier: farman20ali.kport
+PackageIdentifier: AlienHub.kport
 PackageVersion: 5.1.0
 PackageLocale: en-US
 PackageName: kport
-Publisher: farman20ali
+Publisher: Alien Hub
 License: Apache-2.0
 ShortDescription: Cross-platform port inspector and killer
 Installers:

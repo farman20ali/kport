@@ -212,7 +212,7 @@ python manage.py publish --winget --from-release
 ```
 
 #### 2. First-Time Package Submission (v5.1.0 — already done)
-> ⚠️ The first-time submission for `farman20ali.kport` was done with v5.1.0.  
+> ⚠️ The first-time submission for `AlienHub.kport` was done with v5.1.0.  
 > **Do NOT use `--first-time` again** — the package already exists in `microsoft/winget-pkgs`.
 
 For reference, the first-time flow was:
@@ -221,7 +221,7 @@ For reference, the first-time flow was:
 python scripts/publish_winget.py --publish --first-time --version 5.1.0
 ```
 
-The v5.1.0 manifest files committed to `packaging/winget/manifests/f/farman20ali/kport/5.1.0/` serve as the permanent reference for the initial onboarding. New versions do **not** need new manifest directories committed to this repo.
+The v5.1.0 manifest files committed to `packaging/winget/manifests/a/AlienHub/kport/5.1.0/` serve as the permanent reference for the initial onboarding. New versions do **not** need new manifest directories committed to this repo.
 
 #### 3. Subsequent Updates (v5.2.0 and beyond)
 For every new release, use `wingetcreate update` — **no manifest files need to be created or committed**:
@@ -230,7 +230,7 @@ For every new release, use `wingetcreate update` — **no manifest files need to
 python scripts/publish_winget.py --publish --version 5.2.0
 
 # Or directly via wingetcreate CLI:
-wingetcreate update farman20ali.kport `
+wingetcreate update AlienHub.kport `
   --version 5.2.0 `
   --urls "https://github.com/farman20ali/kport/releases/download/v5.2.0/kport-5.2.0-setup.exe" `
   --submit `

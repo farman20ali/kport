@@ -144,13 +144,18 @@ source ~/.zshrc
 kport-setup.exe /S
 ```
 
-### Method 2: Chocolatey
+### Method 2: WinGet (Windows Package Manager)
+```powershell
+winget install AlienHub.kport
+```
+
+### Method 3: Chocolatey
 ```powershell
 choco install kport
 ```
 *(Requires the package to be published to community.chocolatey.org, or install from a local `.nupkg` built by `choco_build.py`.)*
 
-### Method 3: Using pip
+### Method 4: Using pip
 ```powershell
 # Install to user directory (RECOMMENDED - no admin needed)
 pip install --user kport
@@ -166,14 +171,14 @@ pip install kport
 
 > 💡 **Troubleshooting:** If `kport` command doesn't work, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
 
-### Method 4: From Source
+### Method 5: From Source
 ```powershell
 git clone https://github.com/farman20ali/kport.git
 cd kport
 pip install .
 ```
 
-### Method 5: Run Without Installing
+### Method 6: Run Without Installing
 ```powershell
 python -m kport -h
 ```

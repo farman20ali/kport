@@ -17,7 +17,7 @@ v5.2.0 is an infrastructure and quality release focused on **cross-platform pack
 **kport is now available on WinGet!**
 
 ```powershell
-winget install farman20ali.kport
+winget install AlienHub.kport
 ```
 
 The v5.1.0 package was submitted as the first-time onboarding PR to `microsoft/winget-pkgs`. v5.2.0 and all future releases are published automatically via `wingetcreate update` — no manual manifest creation required.
@@ -32,10 +32,10 @@ python scripts/publish_winget.py --publish --version 5.2.0
 
 This automatically:
 1. Downloads the release installer from GitHub and computes its SHA-256.
-2. Runs `wingetcreate update farman20ali.kport --version X.Y.Z --urls <installer_url> --submit`.
+2. Runs `wingetcreate update AlienHub.kport --version X.Y.Z --urls <installer_url> --submit`.
 3. Opens a PR on `microsoft/winget-pkgs` for human moderator review.
 
-> **No manifest YAML files need to be committed to this repository** for update releases. Only the initial `5.1.0` manifests in `packaging/winget/manifests/f/farman20ali/kport/5.1.0/` remain as the permanent first-submission reference.
+> **No manifest YAML files need to be committed to this repository** for update releases. Only the initial `5.1.0` manifests in `packaging/winget/manifests/a/AlienHub/kport/5.1.0/` remain as the permanent first-submission reference.
 
 ### WinGet publishing cheat-sheet
 
@@ -103,7 +103,7 @@ pip install --upgrade kport
 
 ### winget
 ```powershell
-winget upgrade farman20ali.kport
+winget upgrade AlienHub.kport
 ```
 
 ### pipx

@@ -51,6 +51,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DIST_DIR   = REPO_ROOT / "dist"
 
 GITHUB_REPO = "farman20ali/kport"
+WINGET_PACKAGE_ID = "AlienHub.kport"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

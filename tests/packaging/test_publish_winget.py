@@ -37,7 +37,7 @@ def test_winget_render_manifests(tmp_path, monkeypatch):
     assert singleton_file.exists()
     singleton_text = singleton_file.read_text(encoding="utf-8")
     assert f"PackageVersion: {version}" in singleton_text
-    assert "PackageIdentifier: farman20ali.kport" in singleton_text
+    assert "PackageIdentifier: AlienHub.kport" in singleton_text
     assert "InstallerType: nullsoft" in singleton_text
     assert "Silent: /S" in singleton_text
     assert test_sha in singleton_text
@@ -45,9 +45,9 @@ def test_winget_render_manifests(tmp_path, monkeypatch):
 
     # 2. Verify multi-file manifest
     assert multi_dir.exists()
-    version_file = multi_dir / "farman20ali.kport.yaml"
-    installer_file = multi_dir / "farman20ali.kport.installer.yaml"
-    locale_file = multi_dir / "farman20ali.kport.locale.en-US.yaml"
+    version_file = multi_dir / "AlienHub.kport.yaml"
+    installer_file = multi_dir / "AlienHub.kport.installer.yaml"
+    locale_file = multi_dir / "AlienHub.kport.locale.en-US.yaml"
 
     assert version_file.exists()
     assert installer_file.exists()

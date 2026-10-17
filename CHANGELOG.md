@@ -11,9 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **WinGet Package Manager Support**: Full `wingetcreate`-based publishing pipeline for Windows Package Manager.
-  - First-time package submission via `wingetcreate submit` for `farman20ali.kport` initial onboarding PR.
+  - First-time package submission via `wingetcreate submit` for `AlienHub.kport` initial onboarding PR.
   - Subsequent version updates via `wingetcreate update` (no manifest files needed in repo for updates).
-  - Validated multi-file manifests committed to `packaging/winget/manifests/f/farman20ali/kport/5.1.0/`.
+  - Validated multi-file manifests committed to `packaging/winget/manifests/a/AlienHub/kport/5.1.0/`.
   - Singleton manifest template (`packaging/winget/kport.yaml.template`) and three multi-file templates.
   - `scripts/publish_winget.py` with auto-detect first-time vs update, SHA-256 from GitHub Release, `winget validate`, interactive menu, and CI flags (`--publish`, `--dry-run`, `--manifest-only`, `--validate`, `--first-time`).
   - `manage.py publish --winget` and `manage.py publish --winget --winget-version X.Y.Z` support.
@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Repo rename `port-killer` → `kport`**: Updated all remaining references across workflow files, packaging configs, docs, and scripts.
 
 ### Changed
-- **WinGet update flow** (v5.2.0 onwards): Subsequent releases no longer require committing new manifest files to the repo. `wingetcreate update farman20ali.kport --version X.Y.Z --urls <installer_url> --submit --token <TOKEN>` handles everything automatically. Only the initial first-time submission manifests remain in `packaging/winget/manifests/`.
+- **WinGet update flow** (v5.2.0 onwards): Subsequent releases no longer require committing new manifest files to the repo. `wingetcreate update AlienHub.kport --version X.Y.Z --urls <installer_url> --submit --token <TOKEN>` handles everything automatically. Only the initial first-time submission manifests remain in `packaging/winget/manifests/`.
 - **`publish_winget.py` `render_manifests()`**: Changed from raising `FileNotFoundError` when template is missing to falling back to hardcoded default templates, allowing the script to run on any clean checkout.
 
 ---
