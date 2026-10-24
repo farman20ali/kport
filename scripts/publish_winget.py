@@ -8,7 +8,7 @@ Handles initial submission and updates to microsoft/winget-pkgs via wingetcreate
 │    wingetcreate submit <manifest-dir>    ← opens onboarding PR (done once only)
 │
 │  Every future release (v5.2.0+):
-│    wingetcreate update farman20ali.kport \
+│    wingetcreate update AlienHub.kport \
 │      --version X.Y.Z --urls <installer_url> --submit
 │    NO manifest YAML files need to be created or committed to this repo.
 └───────────────────────────────────────────────────────────────────────
@@ -58,7 +58,7 @@ DIST_DIR    = REPO_ROOT / "dist"
 DIST_WINGET = DIST_DIR / "winget"
 WINGET_DIR  = REPO_ROOT / "packaging" / "winget"
 
-PACKAGE_ID  = "farman20ali.kport"
+PACKAGE_ID  = "AlienHub.kport"
 GITHUB_REPO = "farman20ali/kport"
 
 
@@ -174,7 +174,7 @@ def print_first_time_guide(version: str) -> None:
       python scripts/publish_winget.py --publish --first-time
 
       Or manually submit the generated manifest folder:
-      wingetcreate submit dist/winget/manifests/f/farman20ali/kport/{version} --token $env:WINGET_GITHUB_TOKEN
+      wingetcreate submit dist/winget/manifests/a/AlienHub/kport/{version} --token $env:WINGET_GITHUB_TOKEN
 
     Option B (Interactive wizard from live installer URL):
       wingetcreate new "{url}" --token $env:WINGET_GITHUB_TOKEN
@@ -311,11 +311,11 @@ def resolve_sha256(version: str, installer_path: str | None = None, dry_run: boo
 # ── Manifest Generation & Validation ──────────────────────────────────────────
 
 DEFAULT_SINGLETON_TEMPLATE = """# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
-PackageIdentifier: farman20ali.kport
+PackageIdentifier: AlienHub.kport
 PackageVersion: {version}
 PackageLocale: en-US
 PackageName: kport
-Publisher: farman20ali
+Publisher: Alien Hub
 License: Apache-2.0
 ShortDescription: Cross-platform port inspector and killer
 Installers:
@@ -331,7 +331,7 @@ ManifestVersion: 1.6.0
 """
 
 DEFAULT_VERSION_TEMPLATE = """# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
-PackageIdentifier: farman20ali.kport
+PackageIdentifier: AlienHub.kport
 PackageVersion: {version}
 DefaultLocale: en-US
 ManifestType: version
@@ -339,7 +339,7 @@ ManifestVersion: 1.6.0
 """
 
 DEFAULT_INSTALLER_TEMPLATE = """# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
-PackageIdentifier: farman20ali.kport
+PackageIdentifier: AlienHub.kport
 PackageVersion: {version}
 InstallerType: nullsoft
 Installers:
@@ -354,10 +354,10 @@ ManifestVersion: 1.6.0
 """
 
 DEFAULT_LOCALE_TEMPLATE = """# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
-PackageIdentifier: farman20ali.kport
+PackageIdentifier: AlienHub.kport
 PackageVersion: {version}
 PackageLocale: en-US
-Publisher: farman20ali
+Publisher: Alien Hub
 PublisherUrl: https://github.com/farman20ali
 PublisherSupportUrl: https://github.com/farman20ali/kport/issues
 PackageName: kport
@@ -389,7 +389,7 @@ def render_manifests(version: str, sha256_val: str) -> tuple[Path, Path]:
     """
     DIST_WINGET.mkdir(parents=True, exist_ok=True)
 
-    # 1. Singleton manifest: dist/winget/farman20ali.kport.yaml
+    # 1. Singleton manifest: dist/winget/AlienHub.kport.yaml
     singleton_template = WINGET_DIR / "kport.yaml.template"
     if singleton_template.exists():
         raw_singleton = singleton_template.read_text(encoding="utf-8")
@@ -402,20 +402,22 @@ def render_manifests(version: str, sha256_val: str) -> tuple[Path, Path]:
     singleton_file = DIST_WINGET / f"{PACKAGE_ID}.yaml"
     singleton_file.write_text(singleton_content, encoding="utf-8")
 
-    # 2. Multi-file manifests: dist/winget/manifests/f/farman20ali/kport/<version>/
-    multi_dir = DIST_WINGET / "manifests" / "f" / "farman20ali" / "kport" / version
+    # 2. Multi-file manifests: dist/winget/manifests/<letter>/<publisher>/<package>/<version>/
+    pub_id, pkg_name = PACKAGE_ID.split(".", 1)
+    first_letter = pub_id[0].lower()
+    multi_dir = DIST_WINGET / "manifests" / first_letter / pub_id / pkg_name / version
     multi_dir.mkdir(parents=True, exist_ok=True)
 
     # Also write to repo source under packaging/winget/
-    repo_multi_dir = WINGET_DIR / "manifests" / "f" / "farman20ali" / "kport" / version
+    repo_multi_dir = WINGET_DIR / "manifests" / first_letter / pub_id / pkg_name / version
     repo_multi_dir.mkdir(parents=True, exist_ok=True)
     repo_singleton_file = WINGET_DIR / f"{PACKAGE_ID}.yaml"
     repo_singleton_file.write_text(singleton_content, encoding="utf-8")
 
     templates = [
-        ("farman20ali.kport.yaml.template", f"{PACKAGE_ID}.yaml", DEFAULT_VERSION_TEMPLATE),
-        ("farman20ali.kport.installer.yaml.template", f"{PACKAGE_ID}.installer.yaml", DEFAULT_INSTALLER_TEMPLATE),
-        ("farman20ali.kport.locale.en-US.yaml.template", f"{PACKAGE_ID}.locale.en-US.yaml", DEFAULT_LOCALE_TEMPLATE),
+        (f"{PACKAGE_ID}.yaml.template", f"{PACKAGE_ID}.yaml", DEFAULT_VERSION_TEMPLATE),
+        (f"{PACKAGE_ID}.installer.yaml.template", f"{PACKAGE_ID}.installer.yaml", DEFAULT_INSTALLER_TEMPLATE),
+        (f"{PACKAGE_ID}.locale.en-US.yaml.template", f"{PACKAGE_ID}.locale.en-US.yaml", DEFAULT_LOCALE_TEMPLATE),
     ]
 
     for tmpl_name, out_name, fallback_tmpl in templates:

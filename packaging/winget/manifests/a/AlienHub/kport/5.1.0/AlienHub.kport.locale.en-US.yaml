@@ -1,8 +1,8 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
-PackageIdentifier: farman20ali.kport
-PackageVersion: {version}
+PackageIdentifier: AlienHub.kport
+PackageVersion: 5.1.0
 PackageLocale: en-US
-Publisher: farman20ali
+Publisher: Alien Hub
 PublisherUrl: https://github.com/farman20ali
 PublisherSupportUrl: https://github.com/farman20ali/kport/issues
 PackageName: kport
@@ -21,6 +21,6 @@ Tags:
   - network
   - cli
   - developer-tools
-ReleaseNotesUrl: https://github.com/farman20ali/kport/releases/tag/v{version}
+ReleaseNotesUrl: https://github.com/farman20ali/kport/releases/tag/v5.1.0
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0
