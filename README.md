@@ -90,6 +90,8 @@ python -m kport -h
 > 📖 For detailed platform installation options, see [docs/INSTALL.md](docs/INSTALL.md)
 >
 > 🛠️ For packaging development and local compilation instructions, see [docs/PACKAGING.md](docs/PACKAGING.md)
+>
+> 🗺️ **Roadmap:** For the network operations toolkit vision & Nmap integration roadmap, see [ROADMAP.md](ROADMAP.md)
 
 ## 🚀 Usage
 

@@ -54,6 +54,7 @@ from .docker_engine import (
     docker_action_on_container,
     docker_available,  # noqa: F401  # imported for mock-patching in tests
     docker_mappings_for_host_port,
+    list_container_mappings,
     list_docker_mappings,
 )
 from .formatter import (
@@ -148,17 +149,46 @@ def handle_diagnose(args: argparse.Namespace, inspector: BaseInspector) -> int:
                 badge_color = Colors.MAGENTA
             badge = colorize(proto_val, badge_color + Colors.BOLD)
             print(f"  - PID {p['pid']} ({p['name']}) [{badge}]")
+            if p.get("parent_name"):
+                parent_tag = f" (PID {p['ppid']})" if p.get("ppid") else ""
+                print(f"    Parent:     {p['parent_name']}{parent_tag}")
             if p.get("user"):
                 print(f"    User:       {p['user']}")
             if p.get("exe"):
                 print(f"    Executable: {p['exe']}")
             if p.get("cmdline"):
                 print(f"    Command:    {' '.join(p['cmdline'])}")
+        for b in obs_bindings:
+            scope_note = f" ({b.get('scope_label')})" if b.get("scope_label") else ""
+            print(f"    Bind:       {b['laddr']}{scope_note}")
+    elif obs_type == "stale-socket":
+        print("  Type:   Stale / Lingering Kernel Socket")
+        print(colorize("  Warning: Port active in teardown state with no live process owner.", Colors.YELLOW))
+        for b in obs_bindings:
+            scope_note = f" ({b.get('scope_label')})" if b.get("scope_label") else ""
+            print(
+                f"  - Family {b['family']} binding: {b['laddr']}{scope_note} ({b['proto'].upper()} - {b['state'] or 'UNKNOWN'})"
+            )
+        for c in observations.get("connections", []):
+            if (c.get("state") or "").upper() in (
+                "TIME_WAIT",
+                "CLOSE_WAIT",
+                "FIN_WAIT_1",
+                "FIN_WAIT_2",
+                "LAST_ACK",
+                "CLOSING",
+            ):
+                print(
+                    f"  - Socket:   {c.get('local_address')}:{c.get('local_port')} -> {c.get('remote_address')}:{c.get('remote_port')} [{c.get('state')}]"
+                )
     elif obs_type == "local-unknown":
         print("  Type:   Local Binding (Process Unidentified)")
         print(colorize("  Warning: Port active but owning process not visible.", Colors.YELLOW))
         for b in obs_bindings:
-            print(f"  - Family {b['family']} binding: {b['laddr']} ({b['proto'].upper()} - {b['state'] or 'UNKNOWN'})")
+            scope_note = f" ({b.get('scope_label')})" if b.get("scope_label") else ""
+            print(
+                f"  - Family {b['family']} binding: {b['laddr']}{scope_note} ({b['proto'].upper()} - {b['state'] or 'UNKNOWN'})"
+            )
     else:
         print("  No processes or containers are bound to this port.")
     print()
@@ -168,16 +198,34 @@ def handle_diagnose(args: argparse.Namespace, inspector: BaseInspector) -> int:
     if inferences:
         for inf in inferences:
             if inf["type"] == "process_manager":
-                print(f"  - [Process Manager] PID {inf['pid']} appears to be managed by {inf['manager']} service '{inf['name']}'")
+                print(
+                    f"  - [Process Manager] PID {inf['pid']} appears to be managed by {inf['manager']} service '{inf['name']}'"
+                )
             elif inf["type"] == "docker_isolation":
-                print(f"  - [Docker Isolation] Container {inf['container_name']} isolates execution in network namespace")
+                print(
+                    f"  - [Docker Isolation] Container {inf['container_name']} isolates execution in network namespace"
+                )
             elif inf["type"] == "project_context":
                 proj_label = inf.get("project_name") or inf.get("git_root") or "unknown"
                 branch_label = f" ({inf['branch']})" if inf.get("branch") else ""
                 wt_label = " [worktree]" if inf.get("is_worktree") else ""
                 origin_label = f" — {inf['remote_origin']}" if inf.get("remote_origin") else ""
                 confidence = inf.get("confidence", "medium")
-                print(f"  - [Project Context / confidence:{confidence}] PID {inf['pid']} cwd is inside repo '{proj_label}'{branch_label}{wt_label}{origin_label}")
+                print(
+                    f"  - [Project Context / confidence:{confidence}] PID {inf['pid']} cwd is inside repo '{proj_label}'{branch_label}{wt_label}{origin_label}"
+                )
+            elif inf["type"] == "loopback_restriction":
+                print(f"  - [Binding Scope] {inf['reason']}")
+            elif inf["type"] == "dual_stack":
+                print(f"  - [Dual-Stack] {inf['reason']}")
+            elif inf["type"] == "ipv6_shadowing":
+                print(f"  - [IPv6 Shadowing] {inf['reason']}")
+            elif inf["type"] == "stale_socket":
+                print(f"  - [Stale Socket] {inf['reason']}")
+            elif inf["type"] == "lingering_connections":
+                print(f"  - [Lingering Sockets] {inf['reason']}")
+            else:
+                print(f"  - [{inf.get('type', 'Inference')}] {inf.get('reason', '')}")
     else:
         print("  No inferred process relationships detected.")
     print()
@@ -192,7 +240,16 @@ def handle_diagnose(args: argparse.Namespace, inspector: BaseInspector) -> int:
         print("  No significant security or execution risks detected.")
     print()
 
-    # Section 4: RECOMMENDATION
+    # Section 4: COMPANION TOOL HINT
+    companion_hints = data.get("companion_hints", [])
+    if companion_hints:
+        print(colorize("COMPANION TOOL HINT", Colors.BOLD + Colors.WHITE))
+        for hint in companion_hints:
+            for line in hint.get("description", "").splitlines():
+                print(f"  {line}")
+        print()
+
+    # Section 5: RECOMMENDATION
     print(colorize("RECOMMENDATION", Colors.BOLD + Colors.WHITE))
     for rec in recommendations:
         rec_color = Colors.GREEN if rec["safe"] else Colors.RED
@@ -234,12 +291,12 @@ def handle_stop_service(args: argparse.Namespace, inspector: BaseInspector) -> i
     is_blocked = data["blocked"]
     if not is_blocked:
         if args.json:
-            print(_json_out("stop-service", {
-                "success": True,
-                "port": port,
-                "message": f"Port {port} is already free.",
-                "verified_free": True
-            }))
+            print(
+                _json_out(
+                    "stop-service",
+                    {"success": True, "port": port, "message": f"Port {port} is already free.", "verified_free": True},
+                )
+            )
         else:
             print(colorize(f"Port {port} is already free.", Colors.GREEN))
         return EXIT_PORT_FREE
@@ -248,11 +305,16 @@ def handle_stop_service(args: argparse.Namespace, inspector: BaseInspector) -> i
     pm_managed = [inf for inf in inferences if inf["type"] == "process_manager"]
     if not pm_managed:
         if args.json:
-            print(_json_out("stop-service", {
-                "success": False,
-                "port": port,
-                "message": f"No supported process manager detected for port {port}."
-            }))
+            print(
+                _json_out(
+                    "stop-service",
+                    {
+                        "success": False,
+                        "port": port,
+                        "message": f"No supported process manager detected for port {port}.",
+                    },
+                )
+            )
         else:
             print(colorize(f"No supported process manager detected for port {port}.", Colors.RED), file=sys.stderr)
             print(f"You can use:\n  kport kill {port}", file=sys.stderr)
@@ -346,7 +408,9 @@ def handle_stop_service(args: argparse.Namespace, inspector: BaseInspector) -> i
                 escalation_message = f"Escalation safety check failed: {second_decision.reason}"
             else:
                 if not args.json:
-                    print(colorize(f"Service stop did not free port {port}. Escalating to process kill...", Colors.YELLOW))
+                    print(
+                        colorize(f"Service stop did not free port {port}. Escalating to process kill...", Colors.YELLOW)
+                    )
                 kill_ok, kill_msg = inspector.kill_port(
                     port,
                     graceful_timeout=3.0,
@@ -421,17 +485,25 @@ def handle_stop_service(args: argparse.Namespace, inspector: BaseInspector) -> i
                 print(colorize(f"✓ Service '{service_name}' stopped and port {port} is now free.", Colors.GREEN))
             return EXIT_OK
         else:
-            print(colorize(f"⚠ Service '{service_name}' stopped but port {port} is still blocked.", Colors.YELLOW), file=sys.stderr)
+            print(
+                colorize(f"⚠ Service '{service_name}' stopped but port {port} is still blocked.", Colors.YELLOW),
+                file=sys.stderr,
+            )
             if escalation_triggered:
                 if not second_decision_allowed:
-                    print(colorize(f"⚠ Escalation blocked by safety: {escalation_message}", Colors.RED), file=sys.stderr)
+                    print(
+                        colorize(f"⚠ Escalation blocked by safety: {escalation_message}", Colors.RED), file=sys.stderr
+                    )
                 elif escalation_success:
                     print(colorize(f"✓ Port {port} successfully freed via process kill escalation.", Colors.GREEN))
                     return EXIT_OK
                 else:
                     print(colorize(f"Error: Escalation kill failed. {escalation_message}", Colors.RED), file=sys.stderr)
             else:
-                print(colorize("Run stop-service with --force to attempt process termination.", Colors.YELLOW), file=sys.stderr)
+                print(
+                    colorize("Run stop-service with --force to attempt process termination.", Colors.YELLOW),
+                    file=sys.stderr,
+                )
             return EXIT_GENERAL_ERROR
     else:
         print(colorize(f"Error: Stop command failed: {res.message}", Colors.RED), file=sys.stderr)
@@ -467,6 +539,7 @@ def handle_connections(args: argparse.Namespace, inspector: BaseInspector) -> in
 
     process_filter = getattr(args, "process", None) or None
     state_filter = getattr(args, "state", None) or None
+    proto_filter = getattr(args, "proto", "both") or "both"
 
     if getattr(args, "json", False):
         # JSON path: use shared serialization from diagnostics.py
@@ -476,6 +549,7 @@ def handle_connections(args: argparse.Namespace, inspector: BaseInspector) -> in
             process=process_filter,
             port=port_filter,
             state=state_filter,
+            proto=proto_filter,
         )
         data = {"connections": serialized, "count": len(serialized)}
         print(_json_out("connections", data))
@@ -498,6 +572,9 @@ def handle_connections(args: argparse.Namespace, inspector: BaseInspector) -> in
         s_upper = state_filter.upper()
         conns = [c for c in conns if c.state and c.state.upper() == s_upper]
 
+    if proto_filter in ("tcp", "udp"):
+        conns = [c for c in conns if (c.proto or "tcp").lower() == proto_filter.lower()]
+
     print(colorize("=== ACTIVE CONNECTIONS ===", Colors.CYAN + Colors.BOLD))
     print()
 
@@ -506,25 +583,34 @@ def handle_connections(args: argparse.Namespace, inspector: BaseInspector) -> in
         print()
         return EXIT_OK
 
-    # Print header  (PROCESS column width = 24 to fit most real names)
+    # Print header  (PROCESS column width = 24 to fit most real names, PROTO = 8)
     _PROC_W = 24
-    header = f"{'PID':<8}{'PROCESS':<{_PROC_W}}{'LOCAL':<28}{'REMOTE':<28}{'STATE':<12}"
+    _PROTO_W = 8
+    header = f"{'PID':<8}{'PROCESS':<{_PROC_W}}{'PROTO':<{_PROTO_W}}{'LOCAL':<28}{'REMOTE':<28}{'STATE':<12}"
     print(colorize(header, Colors.BOLD + Colors.WHITE))
 
     for c in conns:
         pid_str = str(c.pid) if c.pid is not None else "-"
         raw_name = c.process_name if c.process_name else "-"
         if len(raw_name) >= _PROC_W:
-            pname_str = raw_name[:_PROC_W - 2] + "\u2026"
+            pname_str = raw_name[: _PROC_W - 2] + "\u2026"
         else:
             pname_str = raw_name
+
+        proto_raw = (c.proto or "tcp").upper()
+        proto_color = Colors.BLUE if proto_raw == "TCP" else Colors.MAGENTA
+        # Colorize and pad outside with spaces so spacing before next column is guaranteed
+        proto_cell = colorize(proto_raw, proto_color + Colors.BOLD) + (" " * max(1, _PROTO_W - len(proto_raw)))
+
         local_str = f"{c.local_address}:{c.local_port}"
         remote_str = f"{c.remote_address}:{c.remote_port}" if c.remote_port is not None else c.remote_address
 
-        state_color = Colors.GREEN if c.state == "ESTABLISHED" else (Colors.YELLOW if c.state == "LISTEN" else Colors.CYAN)
+        state_color = (
+            Colors.GREEN if c.state == "ESTABLISHED" else (Colors.YELLOW if c.state == "LISTEN" else Colors.CYAN)
+        )
         state_str = colorize(c.state, state_color)
 
-        line = f"{pid_str:<8}{pname_str:<{_PROC_W}}{local_str:<28}{remote_str:<28}{state_str}"
+        line = f"{pid_str:<8}{pname_str:<{_PROC_W}}{proto_cell}{local_str:<28}{remote_str:<28}{state_str}"
         print(line)
 
     print()
@@ -640,7 +726,9 @@ def handle_doctor(args: argparse.Namespace, inspector: BaseInspector) -> int:
         print("  Docker is available but no containers with host-port mappings found.")
     else:
         for c in docker_section["containers"]:
-            print(f"  {c['container_name']} ({c['image']})  host:{c['host_port']} → container:{c['container_port']}/{c['proto']}")
+            print(
+                f"  {c['container_name']} ({c['image']})  host:{c['host_port']} → container:{c['container_port']}/{c['proto']}"
+            )
     print()
 
     # Section 7 — Findings
@@ -670,7 +758,11 @@ def handle_inspect_pid_cli(args: argparse.Namespace, inspector: BaseInspector) -
     info = inspector.get_process_info(pid)
     if not info:
         if getattr(args, "json", False):
-            print(_json_out(args.command or "inspect", {"pid": pid, "error": f"Process {pid} not found or details unavailable"}))
+            print(
+                _json_out(
+                    args.command or "inspect", {"pid": pid, "error": f"Process {pid} not found or details unavailable"}
+                )
+            )
         else:
             print(colorize(f"Error: Process {pid} not found or details unavailable", Colors.RED), file=sys.stderr)
         return EXIT_INVALID_INPUT
@@ -684,18 +776,8 @@ def handle_inspect_pid_cli(args: argparse.Namespace, inspector: BaseInspector) -
     if getattr(args, "json", False):
         bindings_json = []
         for b in pid_bindings:
-            bindings_json.append({
-                "port": b.port,
-                "proto": b.proto,
-                "state": b.state or "LISTEN",
-                "laddr": b.laddr
-            })
-        out = {
-            "pid": pid,
-            "type": "process",
-            "process": asdict(info) if info else None,
-            "active_ports": bindings_json
-        }
+            bindings_json.append({"port": b.port, "proto": b.proto, "state": b.state or "LISTEN", "laddr": b.laddr})
+        out = {"pid": pid, "type": "process", "process": asdict(info) if info else None, "active_ports": bindings_json}
         print(_json_out(args.command or "inspect", out))
     else:
         print(colorize(f"\n🔍 Inspecting PID {pid}\n", Colors.CYAN + Colors.BOLD))
@@ -709,7 +791,7 @@ def handle_inspect_pid_cli(args: argparse.Namespace, inspector: BaseInspector) -
             print(f"Parent PID:  {info.ppid}")
         if info.cwd:
             print(f"CWD:         {info.cwd}")
-        
+
         print("\nActive Port Bindings:")
         if not pid_bindings:
             print("  None")
@@ -727,7 +809,9 @@ def handle_kill_pid_cli(args: argparse.Namespace, inspector: BaseInspector) -> i
     info = inspector.get_process_info(pid)
     if not info:
         if getattr(args, "json", False):
-            print(_json_out(args.command or "kill", {"pid": pid, "success": False, "message": f"Process {pid} not found"}))
+            print(
+                _json_out(args.command or "kill", {"pid": pid, "success": False, "message": f"Process {pid} not found"})
+            )
         else:
             print(colorize(f"Error: Process {pid} not found", Colors.RED), file=sys.stderr)
         return EXIT_INVALID_INPUT
@@ -752,7 +836,7 @@ def handle_kill_pid_cli(args: argparse.Namespace, inspector: BaseInspector) -> i
 
     kill_tree = getattr(args, "kill_tree", False)
     dry_run = getattr(args, "dry_run", False)
-    
+
     if kill_tree:
         ok, msg = inspector.kill_process_tree(
             pid,
@@ -773,17 +857,10 @@ def handle_kill_pid_cli(args: argparse.Namespace, inspector: BaseInspector) -> i
         )
 
     # Log audit event
-    audit.log_kill_pid(
-        pid, info.name, dry_run=dry_run, success=ok, message=msg
-    )
+    audit.log_kill_pid(pid, info.name, dry_run=dry_run, success=ok, message=msg)
 
     if getattr(args, "json", False):
-        print(_json_out(args.command or "kill", {
-            "pid": pid,
-            "success": ok,
-            "message": msg,
-            "dry_run": dry_run
-        }))
+        print(_json_out(args.command or "kill", {"pid": pid, "success": ok, "message": msg, "dry_run": dry_run}))
     else:
         if ok:
             print(colorize(f"✓ PID {pid}: {msg}", Colors.GREEN))
@@ -829,10 +906,10 @@ def _select_pids_interactively(
         ).strip()
         if inp.lower() in ("q", "quit", "none", "n", "no", "cancel"):
             return None
-        
+
         if not inp or inp.lower() in ("all", "y", "yes"):
             return pids
-        
+
         selected_pids = []
         for token in inp.split(","):
             token = token.strip()
@@ -840,11 +917,11 @@ def _select_pids_interactively(
                 val = int(token)
                 if 1 <= val <= len(pids):
                     selected_pids.append(pids[val - 1])
-        
+
         if not selected_pids:
             print(colorize("No valid selection.", Colors.YELLOW))
             return None
-        
+
         return selected_pids
     except (KeyboardInterrupt, EOFError):
         print()
@@ -979,10 +1056,7 @@ def handle_hold(args: argparse.Namespace, inspector: BaseInspector) -> int:
 
     # Post-bind intruder check: catch any process that raced us during initialization
     own_pid = _os.getpid()
-    intruders = [
-        pid for pid in inspector.find_pids_on_port(port, proto=proto)
-        if pid is not None and pid != own_pid
-    ]
+    intruders = [pid for pid in inspector.find_pids_on_port(port, proto=proto) if pid is not None and pid != own_pid]
     if intruders:
         for s in held_socks:
             s.close()
@@ -999,23 +1073,32 @@ def handle_hold(args: argparse.Namespace, inspector: BaseInspector) -> int:
     timeout = getattr(args, "timeout", None)
     timeout_str = f" for {timeout}s" if timeout else ""
     proto_label = "TCP & UDP" if proto == "both" else proto.upper()
-    addrs_label = "  ".join(
-        colorize(a, Colors.WHITE + Colors.BOLD) for a in held_addresses
-    ) if held_addresses else colorize(f"*:{port}", Colors.WHITE)
+    addrs_label = (
+        "  ".join(colorize(a, Colors.WHITE + Colors.BOLD) for a in held_addresses)
+        if held_addresses
+        else colorize(f"*:{port}", Colors.WHITE)
+    )
 
     if getattr(args, "json", False):
-        print(_json_out("hold", {
-            "port": port,
-            "proto": proto,
-            "held": True,
-            "addresses": held_addresses,
-            "timeout": timeout,
-        }))
+        print(
+            _json_out(
+                "hold",
+                {
+                    "port": port,
+                    "proto": proto,
+                    "held": True,
+                    "addresses": held_addresses,
+                    "timeout": timeout,
+                },
+            )
+        )
 
-    print(colorize(
-        f"🔒 Port {port} ({proto_label}) is reserved{timeout_str}.  ",
-        Colors.CYAN + Colors.BOLD,
-    ))
+    print(
+        colorize(
+            f"🔒 Port {port} ({proto_label}) is reserved{timeout_str}.  ",
+            Colors.CYAN + Colors.BOLD,
+        )
+    )
     print(f"   Holding:  {addrs_label}")
     print(colorize("   Press Enter or Ctrl+C to release...", Colors.CYAN))
 
@@ -1046,6 +1129,7 @@ def handle_hold(args: argparse.Namespace, inspector: BaseInspector) -> int:
 
     return EXIT_OK
 
+
 def handle_audit(args: argparse.Namespace) -> int:
     """Display recent audit log history."""
     limit = getattr(args, "limit", 20)
@@ -1071,11 +1155,7 @@ def handle_audit(args: argparse.Namespace) -> int:
         user = entry.get("user", "unknown")
         target = entry.get("target", {})
         msg = entry.get("message", "")
-        status = (
-            colorize("SUCCESS", Colors.GREEN)
-            if entry.get("success")
-            else colorize("FAILED", Colors.RED)
-        )
+        status = colorize("SUCCESS", Colors.GREEN) if entry.get("success") else colorize("FAILED", Colors.RED)
         if entry.get("dry_run"):
             status += colorize(" [DRY-RUN]", Colors.YELLOW)
         print(f"[{ts}] {action.upper()} by {user} — {status}")
@@ -1131,14 +1211,24 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                 file=sys.stderr,
             )
 
-        maps = list_docker_mappings(debug=debug)
+        compose_project = getattr(args, "compose_project", None)
+        compose_service = getattr(args, "compose_service", None)
+        engine_arg = getattr(args, "engine", "all")
+        engine = None if engine_arg == "all" else engine_arg
+
+        maps = list_container_mappings(
+            engine=engine,
+            compose_project=compose_project,
+            compose_service=compose_service,
+            debug=debug,
+        )
         if port_filters:
             maps = [m for m in maps if m.host_port in port_filters]
             if not maps and not args.json:
                 ports_str = ", ".join(str(p) for p in port_filters)
                 print(
                     colorize(
-                        f"No Docker-published ports found matching port(s): {ports_str}",
+                        f"No container-published ports found matching port(s): {ports_str}",
                         Colors.YELLOW,
                     )
                 )
@@ -1150,8 +1240,22 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
         return EXIT_OK
 
     if args.command == "list":
+        compose_project = getattr(args, "compose_project", None)
+        compose_service = getattr(args, "compose_service", None)
+        engine_arg = getattr(args, "engine", "all")
+        engine = None if engine_arg == "all" else engine_arg
+
         local = inspector.list_listening(proto=getattr(args, "proto", "both"))
-        docker_maps = list_docker_mappings(debug=debug)
+        docker_maps = list_container_mappings(
+            engine=engine,
+            compose_project=compose_project,
+            compose_service=compose_service,
+            debug=debug,
+        )
+        if compose_project or compose_service:
+            container_ports = {m.host_port for m in docker_maps}
+            local = [b for b in local if b.port in container_ports]
+
         if args.json:
             print(
                 _json_out(
@@ -1181,13 +1285,9 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
         exit_code = EXIT_PORT_FREE
         for port in ports:
             validate_port(port)
-            local_bindings = inspector.find_bindings_on_port(
-                port, proto=getattr(args, "proto", "both")
-            )
+            local_bindings = inspector.find_bindings_on_port(port, proto=getattr(args, "proto", "both"))
             docker_hits = docker_mappings_for_host_port(port, debug=debug)
-            pids = inspector.find_pids_on_port(
-                port, proto=getattr(args, "proto", "both")
-            )
+            pids = inspector.find_pids_on_port(port, proto=getattr(args, "proto", "both"))
 
             if docker_hits:
                 m = docker_hits[0]
@@ -1238,16 +1338,20 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                 for b in local_bindings:
                     pid = b.pid
                     info = inspector.get_process_info(pid) if pid else None
-                    info_list.append({
-                        "pid": pid,
-                        "proto": b.proto or "tcp",
-                        "process": asdict(info) if info else None,
-                    })
+                    info_list.append(
+                        {
+                            "pid": pid,
+                            "proto": b.proto or "tcp",
+                            "process": asdict(info) if info else None,
+                        }
+                    )
                 payload = {"port": port, "type": "local", "pids": info_list}
                 results.append(payload)
                 if not args.json:
                     print_port_bindings_detail(
-                        port, local_bindings, inspector,
+                        port,
+                        local_bindings,
+                        inspector,
                         header=f"Port {port} — Local Process(es):",
                     )
                     print()
@@ -1297,6 +1401,13 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                                     "command": f"kport kill {args.port} --docker-action restart --yes",
                                 },
                             ],
+                            "companion_tool_hints": [
+                                {
+                                    "tool": "netcheck",
+                                    "command": f"netcheck tcp <ip>:{args.port}",
+                                    "description": f"To test container reachability from outside, run: netcheck tcp <ip>:{args.port}",
+                                }
+                            ],
                         },
                     )
                 )
@@ -1308,18 +1419,14 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                     )
                 )
                 print(f'- It is mapped to Docker container "{m.container_name}"')
-                print(
-                    f"- Docker maps host port {m.host_port} \u2192 container port {m.container_port}"
-                )
+                print(f"- Docker maps host port {m.host_port} \u2192 container port {m.container_port}")
                 print("- The process runs inside an isolated network namespace")
+                print(colorize("  [netcheck Companion Hint]", Colors.CYAN))
+                print(f"  To test container reachability from outside, run: netcheck tcp <ip>:{args.port}")
             return EXIT_PORT_DOCKER
 
-        local_bindings = inspector.find_bindings_on_port(
-            args.port, proto=getattr(args, "proto", "both")
-        )
-        pids = inspector.find_pids_on_port(
-            args.port, proto=getattr(args, "proto", "both")
-        )
+        local_bindings = inspector.find_bindings_on_port(args.port, proto=getattr(args, "proto", "both"))
+        pids = inspector.find_pids_on_port(args.port, proto=getattr(args, "proto", "both"))
 
         if not pids and not local_bindings:
             # Before declaring free: check raw /proc/net/tcp for a socket on this port.
@@ -1371,6 +1478,13 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                                         "note": "Re-run kport with administrator/sudo privileges to see the owning PID",
                                     },
                                 ],
+                                "companion_tool_hints": [
+                                    {
+                                        "tool": "netcheck",
+                                        "command": f"netcheck tcp 127.0.0.1:{args.port}",
+                                        "description": f"To test if the port accepts connections, run: netcheck tcp 127.0.0.1:{args.port}",
+                                    }
+                                ],
                             },
                         )
                     )
@@ -1381,12 +1495,10 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                             Colors.YELLOW + Colors.BOLD,
                         )
                     )
-                    print(
-                        "- A local process is listening, but the owning PID is not visible"
-                    )
-                    print(
-                        "- This is commonly due to missing privileges; try running with sudo"
-                    )
+                    print("- A local process is listening, but the owning PID is not visible")
+                    print("- This is commonly due to missing privileges; try running with sudo")
+                    print(colorize("  [netcheck Companion Hint]", Colors.CYAN))
+                    print(f"  To test if the port accepts connections, run: netcheck tcp 127.0.0.1:{args.port}")
                 return EXIT_OK
 
             if args.json:
@@ -1405,11 +1517,22 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                                     "note": "Port is free \u2014 safe to bind",
                                 },
                             ],
+                            "companion_tool_hints": [
+                                {
+                                    "tool": "netcheck",
+                                    "command": f"netcheck tcp <host>:{args.port}",
+                                    "description": f"To test if a remote host is listening on port {args.port}, run: netcheck tcp <host>:{args.port}",
+                                }
+                            ],
                         },
                     )
                 )
             else:
                 print(colorize(f"Port {args.port} is free", Colors.GREEN))
+                print(colorize("  [netcheck Companion Hint]", Colors.CYAN))
+                print(
+                    f"  To test if a remote host is listening on port {args.port}, run: netcheck tcp <host>:{args.port}"
+                )
             return EXIT_PORT_FREE
 
         if not pids and local_bindings:
@@ -1432,6 +1555,13 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                                     "note": "Re-run kport with administrator/sudo privileges to see the owning PID",
                                 },
                             ],
+                            "companion_tool_hints": [
+                                {
+                                    "tool": "netcheck",
+                                    "command": f"netcheck tcp 127.0.0.1:{args.port}",
+                                    "description": f"To test if the port accepts connections, run: netcheck tcp 127.0.0.1:{args.port}",
+                                }
+                            ],
                         },
                     )
                 )
@@ -1442,12 +1572,10 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                         Colors.YELLOW + Colors.BOLD,
                     )
                 )
-                print(
-                    "- A local process is listening, but the owning PID is not visible"
-                )
-                print(
-                    "- This is commonly due to missing privileges; try running with sudo"
-                )
+                print("- A local process is listening, but the owning PID is not visible")
+                print("- This is commonly due to missing privileges; try running with sudo")
+                print(colorize("  [netcheck Companion Hint]", Colors.CYAN))
+                print(f"  To test if the port accepts connections, run: netcheck tcp 127.0.0.1:{args.port}")
             return EXIT_OK
 
         # Local process explanation
@@ -1465,15 +1593,19 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
             infos.append({"pid": pid, "process": proc_dict, "managed_by": mb})
 
         # Build safe suggested_actions (protected-port-aware)
-        safe_kill = not any(
-            p in DEFAULT_PROTECTED_PORTS for p in [args.port]
-        ) and not any(
+        safe_kill = not any(p in DEFAULT_PROTECTED_PORTS for p in [args.port]) and not any(
             (
                 inspector.get_process_info(p)
-                and inspector.get_process_info(p).name.lower().split(" (")[0]
-                in DEFAULT_PROTECTED_PROCESS_NAMES
+                and inspector.get_process_info(p).name.lower().split(" (")[0] in DEFAULT_PROTECTED_PROCESS_NAMES
             )
             for p in pids
+        )
+        is_loopback = bool(local_bindings) and all(
+            b.laddr.startswith("127.")
+            or b.laddr.startswith("::1")
+            or b.laddr.startswith("[::1]")
+            or b.laddr.startswith("localhost")
+            for b in local_bindings
         )
         if args.json:
             print(
@@ -1507,6 +1639,17 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                                 "note": "Preview what would happen without executing",
                             },
                         ],
+                        "companion_tool_hints": [
+                            {
+                                "tool": "netcheck",
+                                "command": f"netcheck tcp <ip>:{args.port}",
+                                "description": (
+                                    f"To verify remote connectivity from another machine or container, run: netcheck tcp <ip>:{args.port}"
+                                    if is_loopback
+                                    else f"To verify reachability across the network, run: netcheck tcp <ip>:{args.port}"
+                                ),
+                            }
+                        ],
                     },
                 )
             )
@@ -1521,22 +1664,23 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                 proc = entry["process"]
                 mb = entry.get("managed_by")
                 mb_str = f" (managed by {mb})" if mb else ""
-                pid_protos = {
-                    (b.proto or "tcp").upper()
-                    for b in local_bindings
-                    if b.pid == entry["pid"]
-                }
+                pid_protos = {(b.proto or "tcp").upper() for b in local_bindings if b.pid == entry["pid"]}
                 proto_tag = f" [{' / '.join(sorted(pid_protos))}]" if pid_protos else ""
                 if proc:
-                    print(
-                        f"- PID {entry['pid']} ({proc.get('name')}){proto_tag} is listening{mb_str}"
-                    )
+                    print(f"- PID {entry['pid']} ({proc.get('name')}){proto_tag} is listening{mb_str}")
                 else:
                     print(f"- PID {entry['pid']}{proto_tag} is listening{mb_str}")
                 if mb:
                     pm_info = detect_process_manager(entry["pid"])
                     if pm_info and pm_info.get("warning"):
                         print(colorize(f"  ⚠ {pm_info['warning']}", Colors.YELLOW))
+            print()
+            print(colorize("  [netcheck Companion Hint]", Colors.CYAN))
+            if is_loopback:
+                print("  To verify remote connectivity from another machine or container, run:")
+                print(f"    netcheck tcp <ip>:{args.port}")
+            else:
+                print(f"  To verify reachability across the network, run: netcheck tcp <ip>:{args.port}")
         return EXIT_OK
 
     if args.command == "kill":
@@ -1556,9 +1700,7 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
             pids_to_kill_all: list[int] = []
             docker_hits_all = []
             for port in ports:
-                pids = inspector.find_pids_on_port(
-                    port, proto=getattr(args, "proto", "both")
-                )
+                pids = inspector.find_pids_on_port(port, proto=getattr(args, "proto", "both"))
                 pids_to_kill_all.extend(pids)
                 dh = docker_mappings_for_host_port(port, debug=debug)
                 if dh:
@@ -1592,17 +1734,13 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
         exit_codes = []
         for port in ports:
             validate_port(port)
-            pids = inspector.find_pids_on_port(
-                port, proto=getattr(args, "proto", "both")
-            )
+            pids = inspector.find_pids_on_port(port, proto=getattr(args, "proto", "both"))
 
             # Check safety policy
             safe, safety_msg = check_safety_policy(port, pids, args, inspector)
             if not safe:
                 if args.json:
-                    results.append(
-                        {"port": port, "success": False, "message": safety_msg}
-                    )
+                    results.append({"port": port, "success": False, "message": safety_msg})
                 else:
                     print(
                         colorize(f"Port {port}: {safety_msg}", Colors.RED),
@@ -1612,9 +1750,7 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                 exit_codes.append(EXIT_PERMISSION)
                 continue
 
-            local_bindings = inspector.find_bindings_on_port(
-                port, proto=getattr(args, "proto", "both")
-            )
+            local_bindings = inspector.find_bindings_on_port(port, proto=getattr(args, "proto", "both"))
             docker_hits = docker_mappings_for_host_port(port, debug=debug)
             if docker_hits:
                 m = docker_hits[0]
@@ -1675,25 +1811,23 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                         container_port=getattr(m, "container_port", None),
                     )
                 ):
-                        if args.json:
-                            results.append(
-                                {
-                                    "port": port,
-                                    "type": "docker",
-                                    "container": m.container_name,
-                                    "container_id": m.container_id,
-                                    "action": "rm",
-                                    "ok": False,
-                                    "message": "Removing a Docker container is irreversible. Use --force in addition to --yes to bypass interactive confirmation.",
-                                }
-                            )
-                        overall_ok = False
-                        exit_codes.append(EXIT_PERMISSION)
-                        continue
+                    if args.json:
+                        results.append(
+                            {
+                                "port": port,
+                                "type": "docker",
+                                "container": m.container_name,
+                                "container_id": m.container_id,
+                                "action": "rm",
+                                "ok": False,
+                                "message": "Removing a Docker container is irreversible. Use --force in addition to --yes to bypass interactive confirmation.",
+                            }
+                        )
+                    overall_ok = False
+                    exit_codes.append(EXIT_PERMISSION)
+                    continue
 
-                ok, msg = docker_action_on_container(
-                    m.container_id, action=action, dry_run=args.dry_run, debug=debug
-                )
+                ok, msg = docker_action_on_container(m.container_id, action=action, dry_run=args.dry_run, debug=debug)
                 # Audit log for docker action
                 audit.log_docker_action(
                     m.container_id,
@@ -1761,7 +1895,9 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
             # Show what will be killed, grouped by protocol
             if not args.json:
                 print_port_bindings_detail(
-                    port, local_bindings, inspector,
+                    port,
+                    local_bindings,
+                    inspector,
                     header=f"Port {port} — processes to terminate:",
                 )
 
@@ -1782,7 +1918,12 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                 print(f"  [3] UDP only (PID {', '.join(map(str, udp_pids))})")
                 print("  [q] Cancel")
                 print()
-                print(colorize(f"Tip: You can target directly next time with:\n  kport kill {port} --proto=tcp\n  kport kill {port} --proto=udp", Colors.CYAN))
+                print(
+                    colorize(
+                        f"Tip: You can target directly next time with:\n  kport kill {port} --proto=tcp\n  kport kill {port} --proto=udp",
+                        Colors.CYAN,
+                    )
+                )
                 print()
                 try:
                     choice = input(colorize("Choice [1/2/3/q]: ", Colors.CYAN + Colors.BOLD)).strip().lower()
@@ -1802,8 +1943,10 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                     overall_ok = False
                     continue
             elif not args.json and not args.yes:
-                active_proto = "TCP" if tcp_bindings and not udp_bindings else (
-                    "UDP" if udp_bindings and not tcp_bindings else requested_proto.upper()
+                active_proto = (
+                    "TCP"
+                    if tcp_bindings and not udp_bindings
+                    else ("UDP" if udp_bindings and not tcp_bindings else requested_proto.upper())
                 )
                 active_bindings = tcp_bindings or udp_bindings or local_bindings
                 active_pids = sorted({b.pid for b in active_bindings if b.pid})
@@ -1836,9 +1979,7 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                 )
 
                 # Audit log
-                audit.log_kill_port(
-                    port, pids, dry_run=args.dry_run, success=ok, message=msg
-                )
+                audit.log_kill_port(port, pids, dry_run=args.dry_run, success=ok, message=msg)
 
                 if args.json:
                     results.append(
@@ -1852,7 +1993,11 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                         }
                     )
                 else:
-                    proto_label = f" [{kill_proto.upper()}]" if kill_proto in ("tcp", "udp") else (" [TCP/UDP]" if kill_proto == "both" else "")
+                    proto_label = (
+                        f" [{kill_proto.upper()}]"
+                        if kill_proto in ("tcp", "udp")
+                        else (" [TCP/UDP]" if kill_proto == "both" else "")
+                    )
                     if ok:
                         print(colorize(f"✓ Port {port}{proto_label} freed: {msg}", Colors.GREEN))
                     else:
@@ -1959,9 +2104,7 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                 )
 
             # Audit log
-            audit.log_kill_pid(
-                pid, pname, dry_run=args.dry_run, success=ok, message=msg
-            )
+            audit.log_kill_pid(pid, pname, dry_run=args.dry_run, success=ok, message=msg)
 
             if ok:
                 killed.append({"pid": pid, "msg": msg})
@@ -1989,9 +2132,7 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                 pname = (info.name if info else "").lower()
                 if "docker-proxy" in pname or pname.startswith("docker"):
                     continue
-                non_docker_pids.append(
-                    {"pid": pid, "process": asdict(info) if info else None}
-                )
+                non_docker_pids.append({"pid": pid, "process": asdict(info) if info else None})
             if non_docker_pids:
                 conflicts.append(
                     {
@@ -2006,11 +2147,7 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
             if not conflicts:
                 print(colorize("No port conflicts detected.", Colors.GREEN))
             else:
-                print(
-                    colorize(
-                        "WARNING: Port conflict detected", Colors.YELLOW + Colors.BOLD
-                    )
-                )
+                print(colorize("WARNING: Port conflict detected", Colors.YELLOW + Colors.BOLD))
                 for c in conflicts:
                     print(f"\nPort: {c['port']}")
                     print(f"- Docker container: {c['docker']['container_name']}")
@@ -2035,9 +2172,7 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
             ports_to_watch = [single]
         else:
             print(
-                colorize(
-                    "Error: watch requires a port, --ports, or --range", Colors.RED
-                ),
+                colorize("Error: watch requires a port, --ports, or --range", Colors.RED),
                 file=sys.stderr,
             )
             return EXIT_INVALID_INPUT
@@ -2083,15 +2218,9 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
             if stype == "free":
                 return f"port {port}: FREE"
             elif stype == "docker":
-                return (
-                    f"port {port}: DOCKER '{state['container']}' "
-                    f"({state['image']}, status={state['status']})"
-                )
+                return f"port {port}: DOCKER '{state['container']}' ({state['image']}, status={state['status']})"
             elif stype == "local":
-                procs_str = ", ".join(
-                    f"{name} (PID {pid})"
-                    for pid, name in zip(state["pids"], state["processes"])
-                )
+                procs_str = ", ".join(f"{name} (PID {pid})" for pid, name in zip(state["pids"], state["processes"]))
                 return f"port {port}: LOCAL {procs_str}"
             elif stype == "local-unknown":
                 return f"port {port}: LOCAL (PID hidden)"
@@ -2101,13 +2230,11 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
             if a["type"] != b["type"]:
                 return True
             if a["type"] == "docker":
-                return a["container"] != b.get("container") or a["status"] != b.get(
-                    "status"
-                )
+                return a["container"] != b.get("container") or a["status"] != b.get("status")
             if a["type"] == "local":
-                return set(a["pids"]) != set(b.get("pids", [])) or sorted(
-                    a["processes"]
-                ) != sorted(b.get("processes", []))
+                return set(a["pids"]) != set(b.get("pids", [])) or sorted(a["processes"]) != sorted(
+                    b.get("processes", [])
+                )
             return False
 
         for port in ports_to_watch:
@@ -2156,8 +2283,7 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
             ports_str = ", ".join(str(p) for p in ports_to_watch)
             print(
                 colorize(
-                    f"\n\U0001f440 Watching port(s) {ports_str} (interval={interval}s). "
-                    "Press Ctrl+C to stop.",
+                    f"\n\U0001f440 Watching port(s) {ports_str} (interval={interval}s). Press Ctrl+C to stop.",
                     Colors.CYAN + Colors.BOLD,
                 )
             )
@@ -2165,10 +2291,7 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
         start_time = time.time()
         try:
             while True:
-                if (
-                    timeout_sec is not None
-                    and (time.time() - start_time) >= timeout_sec
-                ):
+                if timeout_sec is not None and (time.time() - start_time) >= timeout_sec:
                     if args.json:
                         print(
                             json.dumps(
@@ -2209,11 +2332,7 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                             sys.stdout.flush()
 
                         else:
-                            color = (
-                                Colors.GREEN
-                                if current["type"] == "free"
-                                else Colors.YELLOW
-                            )
+                            color = Colors.GREEN if current["type"] == "free" else Colors.YELLOW
                             print(
                                 colorize(
                                     f"[{ts.strftime('%Y-%m-%d %H:%M:%S')}] \U0001f501 {desc}",
@@ -2292,13 +2411,9 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
     # Inspect port
     if args.inspect is not None:
         validate_port(args.inspect)
-        local_bindings = inspector.find_bindings_on_port(
-            args.inspect, proto=getattr(args, "proto", "both")
-        )
+        local_bindings = inspector.find_bindings_on_port(args.inspect, proto=getattr(args, "proto", "both"))
         docker_hits = docker_mappings_for_host_port(args.inspect, debug=args.debug)
-        pids = inspector.find_pids_on_port(
-            args.inspect, proto=getattr(args, "proto", "both")
-        )
+        pids = inspector.find_pids_on_port(args.inspect, proto=getattr(args, "proto", "both"))
         if not pids:
             if docker_hits:
                 m = docker_hits[0]
@@ -2325,9 +2440,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                         )
                     )
                     print(f"Image: {m.image}")
-                    print(
-                        f"Host Port: {m.host_port} → Container Port: {m.container_port}/{m.proto}"
-                    )
+                    print(f"Host Port: {m.host_port} → Container Port: {m.container_port}/{m.proto}")
                     print(f"Status: {m.status}")
             elif local_bindings:
                 msg = "Port is in use, but the owning PID is not visible (try running with sudo/admin)."
@@ -2357,11 +2470,13 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
             for b in local_bindings:
                 pid = b.pid
                 info = inspector.get_process_info(pid) if pid else None
-                info_list.append({
-                    "pid": pid,
-                    "proto": b.proto or "tcp",
-                    "process": asdict(info) if info else None,
-                })
+                info_list.append(
+                    {
+                        "pid": pid,
+                        "proto": b.proto or "tcp",
+                        "process": asdict(info) if info else None,
+                    }
+                )
             if args.json:
                 out = {"port": args.inspect, "pids": info_list}
                 if docker_hits:
@@ -2369,14 +2484,17 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                 print(_json_out("inspect", out))
             else:
                 print_port_bindings_detail(
-                    args.inspect, local_bindings, inspector,
+                    args.inspect,
+                    local_bindings,
+                    inspector,
                     header=f"Port {args.inspect} — In Use:",
                 )
                 if docker_hits:
                     m = docker_hits[0]
                     print(
                         colorize(
-                            f"Docker: {m.container_name} ({m.image})" f" host {m.host_port} -> {m.container_port}/{m.proto}",
+                            f"Docker: {m.container_name} ({m.image})"
+                            f" host {m.host_port} -> {m.container_port}/{m.proto}",
                             Colors.CYAN,
                         )
                     )
@@ -2414,20 +2532,12 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                     )
                 )
             else:
-                print(
-                    colorize(f"{'Port':<8} {'PID':<8} {'Process':<30}", Colors.BOLD)
-                )
+                print(colorize(f"{'Port':<8} {'PID':<8} {'Process':<30}", Colors.BOLD))
                 print("─" * 60)
                 for r in results:
                     pname = r["process"]["name"] if r["process"] else "-"
-                    print(
-                        f"{colorize(str(r['port']), Colors.CYAN):<8} {r['pid']!s:<8} {pname:<30}"
-                    )
-                print(
-                    colorize(
-                        f"\n✓ Found processes on {len(results)} items", Colors.GREEN
-                    )
-                )
+                    print(f"{colorize(str(r['port']), Colors.CYAN):<8} {r['pid']!s:<8} {pname:<30}")
+                print(colorize(f"\n✓ Found processes on {len(results)} items", Colors.GREEN))
 
     # Inspect range
     if args.inspect_range:
@@ -2461,15 +2571,11 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                     )
                 )
             else:
-                print(
-                    colorize(f"{'Port':<8} {'PID':<8} {'Process':<30}", Colors.BOLD)
-                )
+                print(colorize(f"{'Port':<8} {'PID':<8} {'Process':<30}", Colors.BOLD))
                 print("─" * 60)
                 for r in results:
                     pname = r["process"]["name"] if r["process"] else "-"
-                    print(
-                        f"{colorize(str(r['port']), Colors.CYAN):<8} {r['pid']!s:<8} {pname:<30}"
-                    )
+                    print(f"{colorize(str(r['port']), Colors.CYAN):<8} {r['pid']!s:<8} {pname:<30}")
                 print(
                     colorize(
                         f"\n✓ Found processes on {len(results)} entries",
@@ -2481,9 +2587,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
     if args.inspect_process:
         pname = args.inspect_process
         proto_req = getattr(args, "proto", "both")
-        bindings = inspector.find_ports_by_process_name(
-            pname, exact=args.exact, proto=proto_req
-        )
+        bindings = inspector.find_ports_by_process_name(pname, exact=args.exact, proto=proto_req)
         if args.json:
             print(_json_out("inspect-process", {"process": pname, "bindings": [asdict(b) for b in bindings]}))
             if not bindings:
@@ -2627,11 +2731,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                         Colors.GREEN,
                     )
                 )
-                print(
-                    colorize(
-                        f"\u2713 Total connections: {len(bindings)}", Colors.GREEN
-                    )
-                )
+                print(colorize(f"\u2713 Total connections: {len(bindings)}", Colors.GREEN))
 
     # Kill by process name (legacy)
     if args.kill_process:
@@ -2641,11 +2741,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
             if args.json:
                 print(_json_out("kill-process", {"name": pname, "pids": []}))
             else:
-                print(
-                    colorize(
-                        f"❌ No processes found matching '{pname}'", Colors.RED
-                    )
-                )
+                print(colorize(f"❌ No processes found matching '{pname}'", Colors.RED))
         else:
             # Check safety policy
             safe, safety_msg = check_safety_policy(None, pids, args, inspector)
@@ -2669,9 +2765,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                     out = []
                     for pid in pids:
                         info = inspector.get_process_info(pid)
-                        out.append(
-                            {"pid": pid, "process": asdict(info) if info else None}
-                        )
+                        out.append({"pid": pid, "process": asdict(info) if info else None})
                     print(
                         _json_out(
                             "kill-process",
@@ -2741,11 +2835,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
 
                         if ok:
                             killed_count += 1
-                            print(
-                                colorize(
-                                    f"✓ Killed PID {pid} ({msg})", Colors.GREEN
-                                )
-                            )
+                            print(colorize(f"✓ Killed PID {pid} ({msg})", Colors.GREEN))
                         else:
                             failed_count += 1
                             print(
@@ -2774,9 +2864,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
     # Kill single port (legacy)
     if args.kill is not None:
         validate_port(args.kill)
-        pids = inspector.find_pids_on_port(
-            args.kill, proto=getattr(args, "proto", "both")
-        )
+        pids = inspector.find_pids_on_port(args.kill, proto=getattr(args, "proto", "both"))
 
         # Check safety policy
         safe, safety_msg = check_safety_policy(args.kill, pids, args, inspector)
@@ -2796,9 +2884,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                 print(colorize(safety_msg, Colors.RED), file=sys.stderr)
             return EXIT_PERMISSION
 
-        local_bindings = inspector.find_bindings_on_port(
-            args.kill, proto=getattr(args, "proto", "both")
-        )
+        local_bindings = inspector.find_bindings_on_port(args.kill, proto=getattr(args, "proto", "both"))
         docker_hits = docker_mappings_for_host_port(args.kill, debug=args.debug)
         if not pids:
             if docker_hits:
@@ -2836,22 +2922,22 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                             force=args.force,
                         )
                     ):
-                            if args.json:
-                                print(
-                                    _json_out(
-                                        "kill",
-                                        {
-                                            "port": args.kill,
-                                            "type": "docker",
-                                            "container": m.container_name,
-                                            "container_id": m.container_id,
-                                            "action": "rm",
-                                            "ok": False,
-                                            "message": "Removing a Docker container is irreversible. Use --force in addition to --yes to bypass interactive confirmation.",
-                                        },
-                                    )
+                        if args.json:
+                            print(
+                                _json_out(
+                                    "kill",
+                                    {
+                                        "port": args.kill,
+                                        "type": "docker",
+                                        "container": m.container_name,
+                                        "container_id": m.container_id,
+                                        "action": "rm",
+                                        "ok": False,
+                                        "message": "Removing a Docker container is irreversible. Use --force in addition to --yes to bypass interactive confirmation.",
+                                    },
                                 )
-                            return EXIT_PERMISSION
+                            )
+                        return EXIT_PERMISSION
 
                     if action:
                         ok, msg = docker_action_on_container(
@@ -2861,11 +2947,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                             debug=args.debug,
                         )
                         wait_ok = True
-                        if (
-                            ok
-                            and getattr(args, "wait_for_exit", None) is not None
-                            and not args.dry_run
-                        ):
+                        if ok and getattr(args, "wait_for_exit", None) is not None and not args.dry_run:
                             if not args.json:
                                 print(
                                     colorize(
@@ -2873,9 +2955,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                                         Colors.WHITE,
                                     )
                                 )
-                            wait_ok = _poll_until_free(
-                                args.kill, args.wait_for_exit, inspector
-                            )
+                            wait_ok = _poll_until_free(args.kill, args.wait_for_exit, inspector)
                             if not wait_ok and not args.json:
                                 print(
                                     colorize(
@@ -2957,13 +3037,11 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                 )
 
                 wait_ok = True
-                if (
-                    ok
-                    and getattr(args, "wait_for_exit", None) is not None
-                    and not args.dry_run
-                ):
+                if ok and getattr(args, "wait_for_exit", None) is not None and not args.dry_run:
                     wait_ok = _poll_until_free(
-                        args.kill, args.wait_for_exit, inspector,
+                        args.kill,
+                        args.wait_for_exit,
+                        inspector,
                         proto=getattr(args, "proto", "both"),
                     )
                 out = {
@@ -2981,7 +3059,9 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
 
             else:
                 print_port_bindings_detail(
-                    args.kill, local_bindings, inspector,
+                    args.kill,
+                    local_bindings,
+                    inspector,
                     header=f"Port {args.kill} — processes to terminate:",
                 )
                 if docker_hits:
@@ -3008,7 +3088,12 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                     print(f"  [3] UDP only (PID {', '.join(map(str, udp_pids))})")
                     print("  [q] Cancel")
                     print()
-                    print(colorize(f"Tip: You can target directly next time with:\n  kport -k {args.kill} --proto=tcp\n  kport -k {args.kill} --proto=udp", Colors.CYAN))
+                    print(
+                        colorize(
+                            f"Tip: You can target directly next time with:\n  kport -k {args.kill} --proto=tcp\n  kport -k {args.kill} --proto=udp",
+                            Colors.CYAN,
+                        )
+                    )
                     print()
                     try:
                         choice = input(colorize("Choice [1/2/3/q]: ", Colors.CYAN + Colors.BOLD)).strip().lower()
@@ -3026,8 +3111,10 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                         print(colorize("Operation cancelled.", Colors.YELLOW))
                         return EXIT_GENERAL_ERROR
                 elif not args.yes:
-                    active_proto = "TCP" if tcp_bindings and not udp_bindings else (
-                        "UDP" if udp_bindings and not tcp_bindings else requested_proto.upper()
+                    active_proto = (
+                        "TCP"
+                        if tcp_bindings and not udp_bindings
+                        else ("UDP" if udp_bindings and not tcp_bindings else requested_proto.upper())
                     )
                     active_bindings = tcp_bindings or udp_bindings or local_bindings
                     active_pids = sorted({b.pid for b in active_bindings if b.pid})
@@ -3058,11 +3145,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                     )
 
                     wait_ok = True
-                    if (
-                        ok
-                        and getattr(args, "wait_for_exit", None) is not None
-                        and not args.dry_run
-                    ):
+                    if ok and getattr(args, "wait_for_exit", None) is not None and not args.dry_run:
                         print(
                             colorize(
                                 f"⌛ Waiting for port {args.kill} to be free (timeout {args.wait_for_exit}s)...",
@@ -3070,7 +3153,9 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                             )
                         )
                         wait_ok = _poll_until_free(
-                            args.kill, args.wait_for_exit, inspector,
+                            args.kill,
+                            args.wait_for_exit,
+                            inspector,
                             proto=kill_proto,
                         )
                         if not wait_ok:
@@ -3082,13 +3167,13 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                                 file=sys.stderr,
                             )
                         else:
-                            print(
-                                colorize(
-                                    f"✓ Port {args.kill} is now free.", Colors.GREEN
-                                )
-                            )
+                            print(colorize(f"✓ Port {args.kill} is now free.", Colors.GREEN))
 
-                    proto_label = f" [{kill_proto.upper()}]" if kill_proto in ("tcp", "udp") else (" [TCP/UDP]" if kill_proto == "both" else "")
+                    proto_label = (
+                        f" [{kill_proto.upper()}]"
+                        if kill_proto in ("tcp", "udp")
+                        else (" [TCP/UDP]" if kill_proto == "both" else "")
+                    )
                     if ok and wait_ok:
                         print(
                             colorize(
@@ -3117,9 +3202,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
             safe, safety_msg = check_safety_policy(port, pids, args, inspector)
             if not safe:
                 print(
-                    colorize(
-                        f"Port {port} failed safety check: {safety_msg}", Colors.RED
-                    ),
+                    colorize(f"Port {port} failed safety check: {safety_msg}", Colors.RED),
                     file=sys.stderr,
                 )
                 return EXIT_PERMISSION
@@ -3136,15 +3219,10 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                 )
             )
         else:
-            print(
-                colorize("Found processes on the following ports:", Colors.YELLOW)
-            )
+            print(colorize("Found processes on the following ports:", Colors.YELLOW))
             for port, pids in port_pid_map.items():
                 names = [
-                    inspector.get_process_info(pid).name
-                    if inspector.get_process_info(pid)
-                    else "?"
-                    for pid in pids
+                    inspector.get_process_info(pid).name if inspector.get_process_info(pid) else "?" for pid in pids
                 ]
                 print(
                     colorize(
@@ -3175,13 +3253,8 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                     )
 
                     if ok:
-                        print(
-                            colorize(f"✓ Freed port {port} ({msg})", Colors.GREEN)
-                        )
-                        if (
-                            getattr(args, "wait_for_exit", None) is not None
-                            and not args.dry_run
-                        ):
+                        print(colorize(f"✓ Freed port {port} ({msg})", Colors.GREEN))
+                        if getattr(args, "wait_for_exit", None) is not None and not args.dry_run:
                             print(
                                 colorize(
                                     f"⌛ Waiting for port {port} to be free (timeout {args.wait_for_exit}s)...",
@@ -3189,7 +3262,9 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                                 )
                             )
                             wait_ok = _poll_until_free(
-                                port, args.wait_for_exit, inspector,
+                                port,
+                                args.wait_for_exit,
+                                inspector,
                                 proto=getattr(args, "proto", "both"),
                             )
                             if not wait_ok:
@@ -3202,17 +3277,9 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                                 )
                                 failed_ports += 1
                             else:
-                                print(
-                                    colorize(
-                                        f"✓ Port {port} is now free.", Colors.GREEN
-                                    )
-                                )
+                                print(colorize(f"✓ Port {port} is now free.", Colors.GREEN))
                     else:
-                        print(
-                            colorize(
-                                f"✗ Failed to free port {port}: {msg}", Colors.RED
-                            )
-                        )
+                        print(colorize(f"✗ Failed to free port {port}: {msg}", Colors.RED))
                         failed_ports += 1
 
                 if failed_ports > 0:
@@ -3240,9 +3307,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
             safe, safety_msg = check_safety_policy(port, pids, args, inspector)
             if not safe:
                 print(
-                    colorize(
-                        f"Port {port} failed safety check: {safety_msg}", Colors.RED
-                    ),
+                    colorize(f"Port {port} failed safety check: {safety_msg}", Colors.RED),
                     file=sys.stderr,
                 )
                 return EXIT_PERMISSION
@@ -3295,13 +3360,8 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                     )
 
                     if ok:
-                        print(
-                            colorize(f"✓ Freed port {port} ({msg})", Colors.GREEN)
-                        )
-                        if (
-                            getattr(args, "wait_for_exit", None) is not None
-                            and not args.dry_run
-                        ):
+                        print(colorize(f"✓ Freed port {port} ({msg})", Colors.GREEN))
+                        if getattr(args, "wait_for_exit", None) is not None and not args.dry_run:
                             print(
                                 colorize(
                                     f"⌛ Waiting for port {port} to be free (timeout {args.wait_for_exit}s)...",
@@ -3309,7 +3369,9 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                                 )
                             )
                             wait_ok = _poll_until_free(
-                                port, args.wait_for_exit, inspector,
+                                port,
+                                args.wait_for_exit,
+                                inspector,
                                 proto=getattr(args, "proto", "both"),
                             )
                             if not wait_ok:
@@ -3322,17 +3384,9 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                                 )
                                 failed_ports += 1
                             else:
-                                print(
-                                    colorize(
-                                        f"✓ Port {port} is now free.", Colors.GREEN
-                                    )
-                                )
+                                print(colorize(f"✓ Port {port} is now free.", Colors.GREEN))
                     else:
-                        print(
-                            colorize(
-                                f"✗ Failed to free port {port}: {msg}", Colors.RED
-                            )
-                        )
+                        print(colorize(f"✗ Failed to free port {port}: {msg}", Colors.RED))
                         failed_ports += 1
 
                 if failed_ports > 0:

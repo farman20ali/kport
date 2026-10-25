@@ -39,6 +39,12 @@ def enrich_process_name(name: str, cmdline: list[str] | None) -> str:
     if not cmdline or len(cmdline) < 2:
         return name
 
+    from kport.k8s_detector import detect_k8s_proxy
+
+    k8s = detect_k8s_proxy(cmdline, name)
+    if k8s:
+        return f"{name} ({k8s.summary})"
+
     base = os.path.basename(name).lower()
     if base.endswith(".exe"):
         base = base[:-4]

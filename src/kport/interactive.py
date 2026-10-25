@@ -50,17 +50,46 @@ def _format_diagnose_lines(data: dict[str, Any]) -> list[str]:
         lines.append("  Type:   Local Process Binding")
         for p in obs_processes:
             lines.append(f"  - PID {p['pid']} ({p['name']})")
+            if p.get("parent_name"):
+                parent_tag = f" (PID {p['ppid']})" if p.get("ppid") else ""
+                lines.append(f"    Parent:     {p['parent_name']}{parent_tag}")
             if p.get("user"):
                 lines.append(f"    User:       {p['user']}")
             if p.get("exe"):
                 lines.append(f"    Executable: {p['exe']}")
             if p.get("cmdline"):
                 lines.append(f"    Command:    {' '.join(p['cmdline'])}")
+        for b in obs_bindings:
+            scope_note = f" ({b.get('scope_label')})" if b.get("scope_label") else ""
+            lines.append(f"    Bind:       {b['laddr']}{scope_note}")
+    elif obs_type == "stale-socket":
+        lines.append("  Type:   Stale / Lingering Kernel Socket")
+        lines.append("  Warning: Port active in teardown state with no live process owner.")
+        for b in obs_bindings:
+            scope_note = f" ({b.get('scope_label')})" if b.get("scope_label") else ""
+            lines.append(
+                f"  - Family {b['family']} binding: {b['laddr']}{scope_note} ({b['proto'].upper()} - {b['state'] or 'UNKNOWN'})"
+            )
+        for c in observations.get("connections", []):
+            if (c.get("state") or "").upper() in (
+                "TIME_WAIT",
+                "CLOSE_WAIT",
+                "FIN_WAIT_1",
+                "FIN_WAIT_2",
+                "LAST_ACK",
+                "CLOSING",
+            ):
+                lines.append(
+                    f"  - Socket:   {c.get('local_address')}:{c.get('local_port')} -> {c.get('remote_address')}:{c.get('remote_port')} [{c.get('state')}]"
+                )
     elif obs_type == "local-unknown":
         lines.append("  Type:   Local Binding (Process Unidentified)")
         lines.append("  Warning: Port active but owning process not visible.")
         for b in obs_bindings:
-            lines.append(f"  - Family {b['family']} binding: {b['laddr']} ({b['proto'].upper()} - {b['state'] or 'UNKNOWN'})")
+            scope_note = f" ({b.get('scope_label')})" if b.get("scope_label") else ""
+            lines.append(
+                f"  - Family {b['family']} binding: {b['laddr']}{scope_note} ({b['proto'].upper()} - {b['state'] or 'UNKNOWN'})"
+            )
     else:
         lines.append("  No processes or containers are bound to this port.")
     lines.append("")
@@ -70,16 +99,34 @@ def _format_diagnose_lines(data: dict[str, Any]) -> list[str]:
     if inferences:
         for inf in inferences:
             if inf["type"] == "process_manager":
-                lines.append(f"  - [Process Manager] PID {inf['pid']} appears to be managed by {inf['manager']} service '{inf['name']}'")
+                lines.append(
+                    f"  - [Process Manager] PID {inf['pid']} appears to be managed by {inf['manager']} service '{inf['name']}'"
+                )
             elif inf["type"] == "docker_isolation":
-                lines.append(f"  - [Docker Isolation] Container {inf['container_name']} isolates execution in network namespace")
+                lines.append(
+                    f"  - [Docker Isolation] Container {inf['container_name']} isolates execution in network namespace"
+                )
             elif inf["type"] == "project_context":
                 proj_label = inf.get("project_name") or inf.get("git_root") or "unknown"
                 branch_label = f" ({inf['branch']})" if inf.get("branch") else ""
                 wt_label = " [worktree]" if inf.get("is_worktree") else ""
                 origin_label = f" — {inf['remote_origin']}" if inf.get("remote_origin") else ""
                 confidence = inf.get("confidence", "medium")
-                lines.append(f"  - [Project Context / confidence:{confidence}] PID {inf['pid']} cwd is inside repo '{proj_label}'{branch_label}{wt_label}{origin_label}")
+                lines.append(
+                    f"  - [Project Context / confidence:{confidence}] PID {inf['pid']} cwd is inside repo '{proj_label}'{branch_label}{wt_label}{origin_label}"
+                )
+            elif inf["type"] == "loopback_restriction":
+                lines.append(f"  - [Binding Scope] {inf['reason']}")
+            elif inf["type"] == "dual_stack":
+                lines.append(f"  - [Dual-Stack] {inf['reason']}")
+            elif inf["type"] == "ipv6_shadowing":
+                lines.append(f"  - [IPv6 Shadowing] {inf['reason']}")
+            elif inf["type"] == "stale_socket":
+                lines.append(f"  - [Stale Socket] {inf['reason']}")
+            elif inf["type"] == "lingering_connections":
+                lines.append(f"  - [Lingering Sockets] {inf['reason']}")
+            else:
+                lines.append(f"  - [{inf.get('type', 'Inference')}] {inf.get('reason', '')}")
     else:
         lines.append("  No inferred process relationships detected.")
     lines.append("")
@@ -93,7 +140,16 @@ def _format_diagnose_lines(data: dict[str, Any]) -> list[str]:
         lines.append("  No significant security or execution risks detected.")
     lines.append("")
 
-    # Section 4: RECOMMENDATION
+    # Section 4: COMPANION TOOL HINT
+    companion_hints = data.get("companion_hints", [])
+    if companion_hints:
+        lines.append("COMPANION TOOL HINT")
+        for hint in companion_hints:
+            for line in hint.get("description", "").splitlines():
+                lines.append(f"  {line}")
+        lines.append("")
+
+    # Section 5: RECOMMENDATION
     lines.append("RECOMMENDATION")
     for rec in recommendations:
         lines.append(f"  - Action: {rec['action'].upper()}")
@@ -103,7 +159,6 @@ def _format_diagnose_lines(data: dict[str, Any]) -> list[str]:
     lines.append("")
 
     return lines
-
 
 
 def _fetch_interactive_rows(inspector: BaseInspector) -> list[dict[str, Any]]:
@@ -164,17 +219,13 @@ def _fallback_numbered_menu(inspector: BaseInspector, args: Any) -> int:
         return 0
 
     print(colorize("\nActive Listening Ports:", Colors.CYAN + Colors.BOLD))
-    print(
-        f"{'#':<4} {'Port':<8} {'PID/ID':<12} {'Process':<20} {'Proto':<6} {'Managed By / State'}"
-    )
+    print(f"{'#':<4} {'Port':<8} {'PID/ID':<12} {'Process':<20} {'Proto':<6} {'Managed By / State'}")
     print("-" * 75)
 
     for idx, r in enumerate(rows, 1):
         pid_str = str(r["pid"]) if r["pid"] else "hidden"
         mb_str = r["managed_by"] or r["state"]
-        print(
-            f"[{idx:<2}] {r['port']:<8} {pid_str:<12} {r['process']:<20} {r['proto']:<6} {mb_str}"
-        )
+        print(f"[{idx:<2}] {r['port']:<8} {pid_str:<12} {r['process']:<20} {r['proto']:<6} {mb_str}")
 
     try:
         inp = input(
@@ -242,9 +293,7 @@ def _fallback_numbered_menu(inspector: BaseInspector, args: Any) -> int:
         return 0
 
 
-def _execute_kills(
-    inspector: BaseInspector, selected_rows: list[dict[str, Any]], args: Any
-) -> int:
+def _execute_kills(inspector: BaseInspector, selected_rows: list[dict[str, Any]], args: Any) -> int:
     """Execute kill action on all user-selected items."""
     if not selected_rows:
         return 0
@@ -279,8 +328,17 @@ def _execute_kills(
     # Confirmation gate unless yes/assume_yes is specified
     assume_yes = getattr(args, "yes", False)
     if not assume_yes:
-        print(colorize("\nWarning: You are about to terminate the following active port(s)/process(es):", Colors.YELLOW + Colors.BOLD))
-        print(colorize(f"{'Type':<10} {'Port':<8} {'PID/ID':<12} {'Process/Container':<25} {'Managed By / State'}", Colors.BOLD))
+        print(
+            colorize(
+                "\nWarning: You are about to terminate the following active port(s)/process(es):",
+                Colors.YELLOW + Colors.BOLD,
+            )
+        )
+        print(
+            colorize(
+                f"{'Type':<10} {'Port':<8} {'PID/ID':<12} {'Process/Container':<25} {'Managed By / State'}", Colors.BOLD
+            )
+        )
         print("-" * 75)
         for r in selected_rows:
             pid_str = str(r["pid"]) if r["pid"] else "hidden"
@@ -290,9 +348,11 @@ def _execute_kills(
             if len(proc_str) > 24:
                 proc_str = proc_str[:21] + "..."
             print(f"{type_str:<10} {r['port']:<8} {pid_str:<12} {proc_str:<25} {mb_str}")
-        
+
         try:
-            if not confirm_prompt("\nAre you sure you want to proceed with terminating these target(s)?", assume_yes=False):
+            if not confirm_prompt(
+                "\nAre you sure you want to proceed with terminating these target(s)?", assume_yes=False
+            ):
                 print(colorize("Cancelled.", Colors.RED))
                 return 0
         except (KeyboardInterrupt, EOFError):
@@ -310,15 +370,9 @@ def _execute_kills(
     for r in selected_rows:
         if r["type"] == "docker":
             action = getattr(args, "docker_action", None) or "stop"
-            ok, msg = docker_action_on_container(
-                r["pid"], action, dry_run=getattr(args, "dry_run", False)
-            )
+            ok, msg = docker_action_on_container(r["pid"], action, dry_run=getattr(args, "dry_run", False))
             if ok:
-                print(
-                    colorize(
-                        f"✓ Port {r['port']} ({r['process']}): {msg}", Colors.GREEN
-                    )
-                )
+                print(colorize(f"✓ Port {r['port']} ({r['process']}): {msg}", Colors.GREEN))
             else:
                 print(colorize(f"✗ Port {r['port']}: {msg}", Colors.RED))
                 errors += 1
@@ -344,11 +398,7 @@ def _execute_kills(
                 message=msg,
             )
             if ok:
-                print(
-                    colorize(
-                        f"✓ Port {r['port']} ({r['process']}): {msg}", Colors.GREEN
-                    )
-                )
+                print(colorize(f"✓ Port {r['port']} ({r['process']}): {msg}", Colors.GREEN))
             else:
                 print(colorize(f"✗ Port {r['port']}: {msg}", Colors.RED))
                 errors += 1
@@ -394,8 +444,7 @@ def run_interactive_picker(inspector: BaseInspector, args: Any) -> int:
                 r
                 for r in rows
                 if not search_query
-                or search_query.lower()
-                in f"{r['port']} {r['process']} {r['managed_by']} {r['pid']}".lower()
+                or search_query.lower() in f"{r['port']} {r['process']} {r['managed_by']} {r['pid']}".lower()
             ]
 
             if current_idx >= len(filtered_rows):
@@ -423,9 +472,7 @@ def run_interactive_picker(inspector: BaseInspector, args: Any) -> int:
 
             # Header
             header = " kport Interactive Picker | Type to filter  [Space] Select  [d] Diagnose  [Ctrl-r] Refresh  [Enter] Kill  [Esc] Quit"
-            stdscr.addstr(
-                0, 0, header[: max_x - 1], curses.A_BOLD | curses.color_pair(1)
-            )
+            stdscr.addstr(0, 0, header[: max_x - 1], curses.A_BOLD | curses.color_pair(1))
 
             filter_line = f" Filter: {search_query}_"
             stdscr.addstr(1, 0, filter_line[: max_x - 1])
@@ -459,16 +506,12 @@ def run_interactive_picker(inspector: BaseInspector, args: Any) -> int:
             if ch in (curses.KEY_UP,):
                 current_idx = max(0, current_idx - 1)
             elif ch in (curses.KEY_DOWN,):
-                current_idx = (
-                    min(len(filtered_rows) - 1, current_idx + 1) if filtered_rows else 0
-                )
-            
+                current_idx = min(len(filtered_rows) - 1, current_idx + 1) if filtered_rows else 0
+
             # Handle selection toggle
             elif ch == ord(" "):
                 if filtered_rows and current_idx < len(filtered_rows):
-                    filtered_rows[current_idx]["selected"] = not filtered_rows[
-                        current_idx
-                    ]["selected"]
+                    filtered_rows[current_idx]["selected"] = not filtered_rows[current_idx]["selected"]
 
             # Handle reload/refresh hotkey (Ctrl-r is code 18)
             elif ch == 18:
@@ -548,10 +591,10 @@ def run_interactive_picker(inspector: BaseInspector, args: Any) -> int:
                         stdscr.clear()
 
                         modal_title = f" Diagnosis overlay — Port {port_to_diagnose}  [Esc/q] Close "
-                        stdscr.addstr(by, bx, modal_title[:bw-1], curses.A_REVERSE | curses.A_BOLD)
+                        stdscr.addstr(by, bx, modal_title[: bw - 1], curses.A_REVERSE | curses.A_BOLD)
 
                         instr = " [Up/Down] Scroll  [Esc/q] Close overlay "
-                        stdscr.addstr(by + bh - 1, bx, instr[:bw-1], curses.A_REVERSE)
+                        stdscr.addstr(by + bh - 1, bx, instr[: bw - 1], curses.A_REVERSE)
 
                         visible_diag_lines = bh - 2
 
@@ -559,7 +602,7 @@ def run_interactive_picker(inspector: BaseInspector, args: Any) -> int:
                             actual_idx = diag_scroll + line_idx
                             if actual_idx < len(diag_lines):
                                 line_content = " " + diag_lines[actual_idx]
-                                stdscr.addstr(by + 1 + line_idx, bx, line_content[:bw-1])
+                                stdscr.addstr(by + 1 + line_idx, bx, line_content[: bw - 1])
 
                         stdscr.refresh()
 

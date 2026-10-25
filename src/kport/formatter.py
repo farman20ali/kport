@@ -186,13 +186,18 @@ def print_table_list_product(local_bindings: list[Any], docker_maps: list[Any]) 
     proto_vals: list[str] = []
     for port in sorted(rows.keys()):
         if "docker" in rows[port] and "locals" not in rows[port]:
-            owner = rows[port]["docker"].container_name
-            data_rows.append([str(port), "TCP", "docker", owner])
-            proto_vals.append("TCP")
+            d = rows[port]["docker"]
+            owner = d.container_name
+            engine_type = getattr(d, "engine", "docker")
+            proto = (getattr(d, "proto", "tcp") or "tcp").upper()
+            data_rows.append([str(port), proto, engine_type, owner])
+            proto_vals.append(proto)
         elif "docker" in rows[port] and "locals" in rows[port]:
-            owner = rows[port]["docker"].container_name
-            data_rows.append([str(port), "TCP", "conflict", owner])
-            proto_vals.append("TCP")
+            d = rows[port]["docker"]
+            owner = d.container_name
+            proto = (getattr(d, "proto", "tcp") or "tcp").upper()
+            data_rows.append([str(port), proto, "conflict", owner])
+            proto_vals.append(proto)
         else:
             for b in rows[port]["locals"]:
                 proto = (b.proto or "tcp").upper()

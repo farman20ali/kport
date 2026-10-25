@@ -218,6 +218,28 @@ Examples:
         help="Protocol type: tcp, udp, or both (default: both)",
     )
     parser.add_argument(
+        "--compose-project",
+        "--project",
+        type=str,
+        dest="compose_project",
+        default=None,
+        help="Filter containers by Docker/Podman Compose project name",
+    )
+    parser.add_argument(
+        "--compose-service",
+        "--service",
+        type=str,
+        dest="compose_service",
+        default=None,
+        help="Filter containers by Compose service name (e.g. web, redis)",
+    )
+    parser.add_argument(
+        "--engine",
+        choices=["docker", "podman", "all"],
+        default="all",
+        help="Container engine to query: docker, podman, or all (default: all)",
+    )
+    parser.add_argument(
         "-I",
         "--interactive",
         action="store_true",
@@ -270,6 +292,28 @@ Examples:
         choices=["tcp", "udp", "both"],
         default="both",
         help="Protocol type: tcp, udp, or both (default: both)",
+    )
+    parent_parser.add_argument(
+        "--compose-project",
+        "--project",
+        type=str,
+        dest="compose_project",
+        default=None,
+        help="Filter containers by Docker/Podman Compose project name",
+    )
+    parent_parser.add_argument(
+        "--compose-service",
+        "--service",
+        type=str,
+        dest="compose_service",
+        default=None,
+        help="Filter containers by Compose service name (e.g. web, redis)",
+    )
+    parent_parser.add_argument(
+        "--engine",
+        choices=["docker", "podman", "all"],
+        default="all",
+        help="Container engine to query: docker, podman, or all (default: all)",
     )
 
     sp_inspect = sub.add_parser(
