@@ -2400,10 +2400,22 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
         return EXIT_OK
 
     if args.command == "watch":
+        import time
+        from datetime import datetime, timezone
+
+        from .watcher import PortEvent, PortWatcher, watcher_platform_info
+
+        interval = getattr(args, "interval", 1.0)
+        do_notify = getattr(args, "notify", False)
+        proto = getattr(args, "proto", "both")
+        until_mode = getattr(args, "until", None)
+        timeout_sec = getattr(args, "timeout", None)
+
         ports_to_watch: list[int] = []
         single = getattr(args, "port", None)
         multi = getattr(args, "ports", None)
         rng = getattr(args, "range", None)
+
         if multi:
             for p in multi:
                 validate_port(p)
@@ -2413,27 +2425,90 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
         elif single is not None:
             validate_port(single)
             ports_to_watch = [single]
-        else:
-            print(
-                colorize("Error: watch requires a port, --ports, or --range", Colors.RED),
-                file=sys.stderr,
+        # No ports specified → global all-ports event-driven mode
+
+        global_mode = not ports_to_watch
+
+        # ----------------------------------------------------------------
+        # Global all-ports watch (Phase 4: PortWatcher event-driven mode)
+        # ----------------------------------------------------------------
+        if global_mode:
+            plat_info = watcher_platform_info()
+            if not args.json:
+                strategy = plat_info.get("interval_strategy", "polling")
+                print(
+                    colorize(
+                        f"\n👁  Watching ALL ports system-wide "
+                        f"(interval={interval}s, strategy={strategy}). "
+                        "Press Ctrl+C to stop.",
+                        Colors.CYAN + Colors.BOLD,
+                    )
+                )
+
+            def _on_event_global(events: list[PortEvent]) -> None:
+                ts = datetime.now(timezone.utc)
+                for ev in events:
+                    if args.json:
+                        print(json.dumps(ev.to_dict()))
+                        sys.stdout.flush()
+                    else:
+                        color = Colors.GREEN if ev.event == "removed" else Colors.YELLOW
+                        icon = "➖" if ev.event == "removed" else "➕"
+                        proc = ev.process_name or "unknown"
+                        print(
+                            colorize(
+                                f"[{ts.strftime('%H:%M:%S')}] {icon} "
+                                f"port {ev.port}/{ev.proto} "
+                                f"{ev.event.upper()} "
+                                f"({proc}, PID {ev.pid})",
+                                color + Colors.BOLD,
+                            )
+                        )
+                    if do_notify:
+                        ev_desc = (
+                            f"port {ev.port}/{ev.proto} {ev.event.upper()}"
+                            f" — {ev.process_name or 'unknown'}"
+                        )
+                        _desktop_notify("kport — port change", ev_desc)
+
+            watcher = PortWatcher(
+                inspector,
+                interval=interval,
+                proto=proto,
+                on_event=_on_event_global,
             )
-            return EXIT_INVALID_INPUT
+            watcher.start()
+            start_time = time.time()
+            try:
+                while True:
+                    if timeout_sec is not None and (time.time() - start_time) >= timeout_sec:
+                        if not args.json:
+                            print(
+                                colorize(
+                                    f"⏱  Watch timeout of {timeout_sec}s reached.",
+                                    Colors.YELLOW,
+                                )
+                            )
+                        break
+                    time.sleep(0.2)
+            except KeyboardInterrupt:
+                if not args.json:
+                    print(colorize("\nStopping watch mode.", Colors.CYAN))
+            finally:
+                watcher.stop()
+            return EXIT_OK
 
-        interval = getattr(args, "interval", 1.0)
-        do_notify = getattr(args, "notify", False)
-
-        import time
-        from datetime import datetime, timezone
-
+        # ----------------------------------------------------------------
+        # Specific-port watch (existing per-port polling logic, now using
+        # PortWatcher for cleaner diffing where --until or --timeout used)
+        # ----------------------------------------------------------------
         states: dict[int, dict[str, Any]] = {}
 
         def get_port_state(port: int) -> dict[str, Any]:
-            _proto = getattr(args, "proto", "tcp")
             inspector._clear_cache(ttl=min(interval, 1.5))
-            local_bindings = inspector.find_bindings_on_port(port, proto=_proto)
+            local_bindings = inspector.find_bindings_on_port(port, proto=proto)
             docker_hits = docker_mappings_for_host_port(port, debug=debug)
-            pids = inspector.find_pids_on_port(port, proto=_proto)
+            pids = inspector.find_pids_on_port(port, proto=proto)
 
             if docker_hits:
                 m = docker_hits[0]
@@ -2499,9 +2574,6 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                         Colors.WHITE,
                     )
                 )
-
-        until_mode = getattr(args, "until", None)
-        timeout_sec = getattr(args, "timeout", None)
 
         def _is_until_satisfied(current_states: dict[int, dict[str, Any]]) -> bool:
             if not until_mode:
@@ -2602,6 +2674,36 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
         except KeyboardInterrupt:
             if not args.json:
                 print(colorize("\nStopping watch mode.", Colors.CYAN))
+        return EXIT_OK
+
+    if args.command == "watcher-info":
+        from .watcher import watcher_platform_info
+
+        info = watcher_platform_info()
+        if args.json:
+            print(json.dumps({"command": "watcher-info", "data": info}))
+        else:
+            print(colorize("\n⚡ kport Watcher Platform Info", Colors.CYAN + Colors.BOLD))
+            print(f"  Platform          : {info['platform']}")
+            print(f"  Watch strategy    : {info['interval_strategy']}")
+            print(f"  /proc/net support : {info['proc_net_available']}")
+            print(f"  inotify support   : {info['inotify_available']}")
+            print(f"  Win32 iphlpapi    : {info['win32_acceleration']}")
+            if info['interval_strategy'] == 'proc_net_accelerated':
+                print(colorize(
+                    "  ✓ Linux /proc/net acceleration active — sub-millisecond port detection.",
+                    Colors.GREEN,
+                ))
+            elif info['interval_strategy'] == 'win32_iphlpapi':
+                print(colorize(
+                    "  ✓ Win32 GetExtendedTcpTable acceleration active.",
+                    Colors.GREEN,
+                ))
+            else:
+                print(colorize(
+                    "  ℹ  Standard polling mode (psutil fallback).",
+                    Colors.YELLOW,
+                ))
         return EXIT_OK
 
     if args.command == "mcp":

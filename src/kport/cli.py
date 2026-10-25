@@ -472,7 +472,13 @@ Examples:
     sp_watch.add_argument(
         "--timeout",
         type=float,
-        help="Maximum time in seconds to wait when using --until",
+        help="Maximum time in seconds to wait when using --until, or total watch duration",
+    )
+
+    sub.add_parser(
+        "watcher-info",
+        parents=[parent_parser],
+        help="Show platform-specific watcher acceleration details (Phase 4)",
     )
 
     sub.add_parser(
