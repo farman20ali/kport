@@ -788,7 +788,9 @@ def handle_inspect_pid_cli(args: argparse.Namespace, inspector: BaseInspector) -
         if info.user:
             print(f"User:        {info.user}")
         if info.ppid:
-            print(f"Parent PID:  {info.ppid}")
+            parent_info = inspector.get_process_info(info.ppid)
+            parent_str = f" ({parent_info.name})" if parent_info else " (terminated)"
+            print(f"Parent PID:  {info.ppid}{parent_str}")
         if info.cwd:
             print(f"CWD:         {info.cwd}")
 
