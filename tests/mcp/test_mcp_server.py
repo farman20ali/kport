@@ -61,19 +61,29 @@ class TestMCPProtocol:
         )
         assert responses[0]["result"]["protocolVersion"] == "2026-07-28"
 
-    def test_tools_list_returns_all_thirteen_tools(self):
+    def test_tools_list_returns_all_tools(self):
+        """Verify the tools/list response contains every registered MCP tool."""
         responses = _send(
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         )
         result = responses[0]["result"]
         names = {t["name"] for t in result["tools"]}
         expected = {
+            # Core port tools
             "list_ports", "inspect_port", "kill_port",
             "diagnose_port", "list_connections", "conflicts", "doctor",
+            # Service / project tools
             "stop_service", "find_project", "suggest_resolution",
-            "inspect_pid", "kill_pid", "kill_process",
-            "find_alternative_port", "get_audit_history",
+            # PID / process tools
+            "inspect_pid", "kill_pid", "kill_process", "inspect_process",
+            # Utility tools
+            "find_alternative_port", "get_audit_history", "swap",
+            # Safety / rules tools
+            "get_safety_rules", "set_safety_rules",
+            # Watcher tools
+            "watch_ports_snapshot", "watcher_info",
         }
+        assert len(names) == 21, f"Expected 21 tools, got {len(names)}: {names - expected or expected - names}"
         assert expected == names
 
     def test_tools_have_required_fields(self):
