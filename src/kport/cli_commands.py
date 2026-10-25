@@ -3090,7 +3090,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                                     print(f"    User:       {info.user}")
                                 if info.ppid:
                                     parent_info = inspector.get_process_info(info.ppid)
-                                    parent_label = f" ({parent_info.name})" if parent_info else ""
+                                    parent_label = f" ({parent_info.name})" if parent_info else " (terminated)"
                                     print(f"    Parent PID: {info.ppid}{parent_label}")
                                 if info.cwd:
                                     print(f"    CWD:        {info.cwd}")
@@ -3150,7 +3150,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                             print(f"         User:       {info.user}")
                         if info.ppid:
                             parent_info = inspector.get_process_info(info.ppid)
-                            parent_label = f" ({parent_info.name})" if parent_info else ""
+                            parent_label = f" ({parent_info.name})" if parent_info else " (terminated)"
                             print(f"         Parent PID: {info.ppid}{parent_label}")
                         if info.cwd:
                             print(f"         CWD:        {info.cwd}")
@@ -3183,7 +3183,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                                 print(f"    User:       {p_info.user}")
                             if p_info.ppid:
                                 parent_info = inspector.get_process_info(p_info.ppid)
-                                parent_label = f" ({parent_info.name})" if parent_info else ""
+                                parent_label = f" ({parent_info.name})" if parent_info else " (terminated)"
                                 print(f"    Parent PID: {p_info.ppid}{parent_label}")
                             if p_info.cwd:
                                 print(f"    CWD:        {p_info.cwd}")
