@@ -214,8 +214,8 @@ Examples:
     parser.add_argument(
         "--proto",
         choices=["tcp", "udp", "both"],
-        default="tcp",
-        help="Protocol type: tcp, udp, or both (default: tcp)",
+        default="both",
+        help="Protocol type: tcp, udp, or both (default: both)",
     )
     parser.add_argument(
         "-I",
@@ -268,8 +268,8 @@ Examples:
     parent_parser.add_argument(
         "--proto",
         choices=["tcp", "udp", "both"],
-        default="tcp",
-        help="Protocol type: tcp, udp, or both (default: tcp)",
+        default="both",
+        help="Protocol type: tcp, udp, or both (default: both)",
     )
 
     sp_inspect = sub.add_parser(
@@ -459,6 +459,7 @@ Examples:
         parents=[parent_parser],
         help="Temporarily bind and reserve a port to block other applications",
     )
+    sp_hold.set_defaults(proto="tcp")
     sp_hold.add_argument("port", type=int, help="Port number to hold/reserve")
     sp_hold.add_argument(
         "--timeout",

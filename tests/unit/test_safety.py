@@ -122,22 +122,27 @@ class TestResolveProtectedSets:
     """Test resolution and parsing of protected ports and process sets."""
 
     def test_none_config_returns_defaults(self):
-        ports, procs = resolve_protected_sets(None)
+        ports, procs, udp_ports = resolve_protected_sets(None)
         assert ports == PROTECTED_PORTS
         assert procs == {p.lower() for p in PROTECTED_PROCESS_NAMES}
+        assert 53 in udp_ports  # DNS protected by default
+        assert 123 in udp_ports  # NTP protected by default
 
     def test_additive_set_resolution(self):
         config = {
             "protected_ports": [3000, 4000],
             "protected_processes": ["CustomService", "worker"],
+            "protected_udp_ports": [9999],
         }
-        ports, procs = resolve_protected_sets(config)
+        ports, procs, udp_ports = resolve_protected_sets(config)
         assert 3000 in ports
         assert 4000 in ports
         assert 22 in ports  # Default preserved
         assert "customservice" in procs
         assert "worker" in procs
         assert "sshd" in procs  # Default preserved
+        assert 9999 in udp_ports  # Config-level UDP port added
+        assert 53 in udp_ports  # Default UDP protected port preserved
 
     def test_safety_decision_tuple_unpacking(self):
         """Ensure SafetyDecision supports legacy boolean unpacking (allowed, reason)."""

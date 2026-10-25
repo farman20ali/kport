@@ -23,6 +23,30 @@ PROTECTED_PORTS: frozenset[int] = frozenset(
     }
 )
 
+# UDP-specific ports that are critical system infrastructure.
+# These sockets are usually owned by the OS/kernel and must not be killed.
+# Applied in addition to PROTECTED_PORTS when the binding protocol is UDP.
+PROTECTED_UDP_PORTS: frozenset[int] = frozenset(
+    {
+        53,    # DNS
+        67,    # DHCP server
+        68,    # DHCP client
+        69,    # TFTP
+        123,   # NTP (time sync)
+        137,   # NetBIOS Name Service
+        138,   # NetBIOS Datagram Service
+        161,   # SNMP
+        162,   # SNMP trap
+        500,   # IKE / IPSec VPN
+        514,   # Syslog
+        520,   # RIP routing
+        1900,  # UPnP / SSDP
+        4500,  # IKE NAT traversal
+        5353,  # mDNS (Bonjour/Avahi)
+        5355,  # LLMNR (Windows name resolution)
+    }
+)
+
 # Critical system process names that must never be targeted.
 # Comparison is always case-insensitive.
 PROTECTED_PROCESS_NAMES: frozenset[str] = frozenset(

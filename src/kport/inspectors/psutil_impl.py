@@ -17,7 +17,7 @@ from .base import BaseInspector, ConnectionInfo, PortBinding, ProcessInfo
 
 
 class PsutilInspector(BaseInspector):
-    def list_listening(self, proto: str = "tcp") -> list[PortBinding]:
+    def list_listening(self, proto: str = "both") -> list[PortBinding]:
         bindings: dict[tuple, PortBinding] = {}
         kinds = (
             ["tcp"]
@@ -41,7 +41,7 @@ class PsutilInspector(BaseInspector):
                 )
                 port = conn.laddr.port if hasattr(conn.laddr, "port") else conn.laddr[1]
                 family = "IPv6" if conn.family.name == "AF_INET6" else "IPv4"
-                state = conn.status
+                state = "UDP" if kind == "udp" and (not conn.status or conn.status == psutil.CONN_NONE) else conn.status
                 pid = conn.pid
                 proc_name = None
                 if pid:
@@ -63,7 +63,7 @@ class PsutilInspector(BaseInspector):
                     )
         return sorted(bindings.values(), key=lambda b: b.port)
 
-    def find_pids_on_port(self, port: int, proto: str = "tcp") -> list[int]:
+    def find_pids_on_port(self, port: int, proto: str = "both") -> list[int]:
         pids = set()
         kinds = (
             ["tcp"]
@@ -92,7 +92,7 @@ class PsutilInspector(BaseInspector):
                     pids.add(conn.pid)
         return sorted(pids)
 
-    def find_bindings_on_port(self, port: int, proto: str = "tcp") -> list[PortBinding]:
+    def find_bindings_on_port(self, port: int, proto: str = "both") -> list[PortBinding]:
         bindings: list[PortBinding] = []
         kinds = (
             ["tcp"]
@@ -139,7 +139,7 @@ class PsutilInspector(BaseInspector):
                         laddr=laddr,
                         pid=pid,
                         process_name=proc_name,
-                        state=conn.status,
+                        state="UDP" if kind == "udp" and (not conn.status or conn.status == psutil.CONN_NONE) else conn.status,
                         proto="tcp" if kind == "tcp" else "udp",
                     )
                 )
@@ -263,7 +263,7 @@ class PsutilInspector(BaseInspector):
 
 
     def find_ports_by_process_name(
-        self, name: str, exact: bool = False, proto: str = "tcp"
+        self, name: str, exact: bool = False, proto: str = "both"
     ) -> list[PortBinding]:
         results: list[PortBinding] = []
         name_lower = name.lower()

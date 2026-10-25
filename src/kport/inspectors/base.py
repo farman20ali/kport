@@ -264,7 +264,7 @@ class BaseInspector:
     def _clear_cache(self, ttl: float = 0.0) -> None:
         """Clear cached state. Subclasses may implement process metadata caching."""
 
-    def list_listening(self, proto: str = "tcp") -> list[PortBinding]:
+    def list_listening(self, proto: str = "both") -> list[PortBinding]:
         """List all active listening ports."""
         raise NotImplementedError()
 
@@ -272,11 +272,11 @@ class BaseInspector:
         """List all active network connections."""
         raise NotImplementedError()
 
-    def find_pids_on_port(self, port: int, proto: str = "tcp") -> list[int]:
+    def find_pids_on_port(self, port: int, proto: str = "both") -> list[int]:
         """Find PIDs currently bound to a port."""
         raise NotImplementedError()
 
-    def find_bindings_on_port(self, port: int, proto: str = "tcp") -> list[PortBinding]:
+    def find_bindings_on_port(self, port: int, proto: str = "both") -> list[PortBinding]:
         """Find listening bindings for a specific port."""
         return [b for b in self.list_listening(proto=proto) if b.port == port]
 
@@ -302,7 +302,7 @@ class BaseInspector:
         raise NotImplementedError()
 
     def find_ports_by_process_name(
-        self, name: str, exact: bool = False, proto: str = "tcp"
+        self, name: str, exact: bool = False, proto: str = "both"
     ) -> list[PortBinding]:
         """Find port bindings matching a process name."""
         raise NotImplementedError()
@@ -517,7 +517,7 @@ class BaseInspector:
         debug: bool = False,
         assume_yes: bool = False,
         kill_tree: bool = False,
-        proto: str = "tcp",
+        proto: str = "both",
         confirm_fn: Callable[[str], bool] | None = None,
     ) -> tuple[bool, str]:
         """
@@ -569,39 +569,40 @@ class BaseInspector:
                 errors.append(f"PID {pid}: {msg}")
 
         # Linux fuser fallback — only when forced and fuser is available
-        _fuser_proto = proto if proto in ("tcp", "udp") else "tcp"
         if (
             remaining_pids
             and platform.system() != "Windows"
             and force
             and shutil.which("fuser")
         ):
-            if debug:
-                print(
-                    f"[debug] PIDs {remaining_pids} survived standard signals. Triggering fuser fallback ({_fuser_proto})...",
-                    file=sys.stderr,
-                )
-            try:
-                subprocess.run(
-                    ["fuser", "-k", f"{port}/{_fuser_proto}"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    check=False,
-                )
-                time.sleep(0.5)
-                remaining_pids = [p for p in remaining_pids if self.is_process_alive(p)]
+            fuser_protos = [proto] if proto in ("tcp", "udp") else ["tcp", "udp"]
+            for _fuser_proto in fuser_protos:
                 if not remaining_pids:
-                    return True, f"Port {port} successfully freed via fuser fallback ({_fuser_proto})"
-            except (subprocess.SubprocessError, OSError) as e:
-                errors.append(f"fuser fallback failed: {e}")
+                    break
+                if debug:
+                    print(
+                        f"[debug] PIDs {remaining_pids} survived standard signals. Triggering fuser fallback ({_fuser_proto})...",
+                        file=sys.stderr,
+                    )
+                try:
+                    subprocess.run(
+                        ["fuser", "-k", f"{port}/{_fuser_proto}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    )
+                    time.sleep(0.5)
+                    remaining_pids = [p for p in remaining_pids if self.is_process_alive(p)]
+                except (subprocess.SubprocessError, OSError) as e:
+                    errors.append(f"fuser fallback failed ({_fuser_proto}): {e}")
 
         if not remaining_pids:
             return True, f"Killed {len(pids)} process(es)"
 
         # Final socket verification — the process may have died but the socket
         # might linger in TIME_WAIT; check what's actually still bound.
-        actual_remaining = self.find_pids_on_port(port)
+        actual_remaining = self.find_pids_on_port(port, proto=proto)
         if actual_remaining:
             return False, (
                 f"Failed to free port. Remaining PIDs: {actual_remaining}. "

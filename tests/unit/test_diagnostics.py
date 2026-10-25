@@ -346,3 +346,49 @@ def test_suggest_next_free_port():
         res = suggest_next_free_port(start_port=3000, count=2, inspector=inspector)
         assert res == [3001, 3002]
 
+
+@pytest.mark.unit
+def test_diagnose_port_dual_protocol():
+    """Ensure diagnose_port detects both TCP and UDP listeners and offers individual protocol commands."""
+    tcp_b = _binding(5001, pid=101, proto="tcp", name="web_tcp")
+    udp_b = _binding(5001, pid=202, proto="udp", name="voice_udp")
+    inspector = FakeInspector(
+        listening=[tcp_b, udp_b],
+        process_info={
+            101: ProcessInfo(pid=101, name="web_tcp"),
+            202: ProcessInfo(pid=202, name="voice_udp"),
+        },
+    )
+    with patch("kport.diagnostics.docker_mappings_for_host_port", return_value=[]):
+        diag = diagnose_port(5001, inspector=inspector)
+        assert diag["blocked"] is True
+        risk_types = [r["type"] for r in diag["risks"]]
+        assert "dual_protocol_conflict" in risk_types
+
+        rec_actions = [r["action"] for r in diag["recommendations"]]
+        assert "kill_tcp_only" in rec_actions
+        assert "kill_udp_only" in rec_actions
+        assert "kill_both" in rec_actions
+
+        tcp_rec = next(r for r in diag["recommendations"] if r["action"] == "kill_tcp_only")
+        udp_rec = next(r for r in diag["recommendations"] if r["action"] == "kill_udp_only")
+        assert "--proto tcp" in tcp_rec["command"]
+        assert "--proto udp" in udp_rec["command"]
+
+
+@pytest.mark.unit
+def test_diagnose_port_protected_udp():
+    """Ensure diagnose_port marks protected UDP ports (e.g. 123 NTP) as safety blocked."""
+    udp_b = _binding(123, pid=500, proto="udp", name="chronyd")
+    inspector = FakeInspector(
+        listening=[udp_b],
+        process_info={500: ProcessInfo(pid=500, name="chronyd")},
+    )
+    with patch("kport.diagnostics.docker_mappings_for_host_port", return_value=[]):
+        diag = diagnose_port(123, inspector=inspector, proto="udp")
+        risk_types = [r["type"] for r in diag["risks"]]
+        assert "protected_udp_port" in risk_types
+        rec_actions = [r["action"] for r in diag["recommendations"]]
+        assert "abort" in rec_actions
+
+

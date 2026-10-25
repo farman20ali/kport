@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 def diagnose_port(
     port: int,
     inspector: BaseInspector,
-    proto: str = "tcp",
+    proto: str = "both",
     config: dict[str, Any] | None = None,
     bypass_safety: bool = False,
 ) -> dict[str, Any]:
@@ -89,8 +89,15 @@ def diagnose_port(
     obs_processes = []
     for pid in pids:
         info = inspector.get_process_info(pid)
+        pid_protos = sorted({
+            (b.proto or "tcp").lower()
+            for b in local_bindings
+            if b.pid == pid
+        })
+        proto_str = "/".join(pid_protos) if pid_protos else "tcp"
         if info:
             proc_dict = asdict(info)
+            proc_dict["proto"] = proto_str
             # Enrich with parent process name for lineage context
             if info.ppid:
                 parent_info = inspector.get_process_info(info.ppid)
@@ -102,7 +109,7 @@ def diagnose_port(
             obs_processes.append(
                 {"pid": pid, "name": "unknown", "exe": None, "cmdline": None,
                  "user": None, "ppid": None, "parent_name": None, "cwd": None,
-                 "start_time": None}
+                 "start_time": None, "proto": proto_str}
             )
 
     obs_docker = [asdict(m) for m in docker_hits]
@@ -206,13 +213,14 @@ def diagnose_port(
             })
 
     # Safety-shield informational risks (read-only annotation)
-    protected_ports, protected_procs = resolve_protected_sets(config)
+    protected_ports, protected_procs, _protected_udp = resolve_protected_sets(config)
 
-    is_protected_port = port in protected_ports
+    is_protected_udp_port = proto in ("udp", "both") and port in _protected_udp
+    is_protected_port = (port in protected_ports) or is_protected_udp_port
     is_protected_process = False
     protected_pids: list[int] = []
 
-    if is_protected_port:
+    if port in protected_ports:
         risks.append({
             "type": "protected_port",
             "message": (
@@ -220,6 +228,27 @@ def diagnose_port(
                 "Termination will be blocked by default."
             ),
             "severity": "IMPORTANT",
+        })
+    elif is_protected_udp_port:
+        risks.append({
+            "type": "protected_udp_port",
+            "message": (
+                f"Port {port}/UDP is a protected system UDP service (e.g. DNS, DHCP, NTP). "
+                "Termination will be blocked by default."
+            ),
+            "severity": "IMPORTANT",
+        })
+
+    has_tcp = any("tcp" in (p.get("proto") or "tcp").lower() for p in obs_processes)
+    has_udp = any("udp" in (p.get("proto") or "").lower() for p in obs_processes)
+    if has_tcp and has_udp:
+        risks.append({
+            "type": "dual_protocol_conflict",
+            "message": (
+                f"Dual-protocol binding detected: Port {port} has both TCP and UDP listeners. "
+                "You can inspect or kill each individually using '--proto tcp' or '--proto udp'."
+            ),
+            "severity": "INFO",
         })
 
     for p in obs_processes:
@@ -331,13 +360,35 @@ def diagnose_port(
                 "safe": True,
             })
         else:
-            pids_str = " ".join(str(p["pid"]) for p in obs_processes)
-            recommendations.append({
-                "action": "kill_processes",
-                "command": f"kport kill {port}",
-                "reason": f"Terminate standard local process(es) on port (PIDs: {pids_str})",
-                "safe": True,
-            })
+            if has_tcp and has_udp:
+                tcp_pids = " ".join(str(p["pid"]) for p in obs_processes if "tcp" in (p.get("proto") or "tcp").lower())
+                udp_pids = " ".join(str(p["pid"]) for p in obs_processes if "udp" in (p.get("proto") or "").lower())
+                recommendations.append({
+                    "action": "kill_tcp_only",
+                    "command": f"kport kill {port} --proto tcp",
+                    "reason": f"Terminate only TCP listener on port {port} (PIDs: {tcp_pids})",
+                    "safe": True,
+                })
+                recommendations.append({
+                    "action": "kill_udp_only",
+                    "command": f"kport kill {port} --proto udp",
+                    "reason": f"Terminate only UDP listener on port {port} (PIDs: {udp_pids})",
+                    "safe": True,
+                })
+                recommendations.append({
+                    "action": "kill_both",
+                    "command": f"kport kill {port}",
+                    "reason": f"Terminate all listeners (both TCP and UDP) on port {port}",
+                    "safe": True,
+                })
+            else:
+                pids_str = " ".join(str(p["pid"]) for p in obs_processes)
+                recommendations.append({
+                    "action": "kill_processes",
+                    "command": f"kport kill {port}",
+                    "reason": f"Terminate standard local process(es) on port (PIDs: {pids_str})",
+                    "safe": True,
+                })
 
     suggested_alt = suggest_next_free_port(port, count=1, inspector=inspector, proto=proto) if is_blocked else []
 
@@ -357,7 +408,7 @@ def suggest_next_free_port(
     count: int = 1,
     max_attempts: int = 20,
     inspector: BaseInspector | None = None,
-    proto: str = "tcp",
+    proto: str = "both",
 ) -> list[int]:
     """Find the next available port(s) starting from start_port + 1 up to start_port + max_attempts."""
     if inspector is None:
@@ -684,7 +735,7 @@ def run_doctor(inspector: BaseInspector) -> dict[str, Any]:
     # 2. Listeners
     bindings: list = []
     try:
-        bindings = inspector.list_listening(proto="tcp")
+        bindings = inspector.list_listening(proto="both")
     except Exception as exc:
         findings.append({
             "severity": "WARNING",

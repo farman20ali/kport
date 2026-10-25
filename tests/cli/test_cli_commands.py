@@ -140,26 +140,48 @@ def test_kill_protected_port_blocked_with_json_response(capsys):
 
 @pytest.mark.cli
 def test_kill_proto_udp_forwarded_to_inspector(capsys):
+    """UDP proto flag is forwarded to the inspector and kill is performed."""
     killed = []
+    # Use a non-protected UDP port (8853 = DNS alternate, not in PROTECTED_UDP_PORTS)
+    TEST_PORT = 8853
 
     class UDPKillInspector(FakeInspector):
-        def find_pids_on_port(self, port, proto="tcp"):
-            return [777] if proto == "udp" else []
+        def find_pids_on_port(self, port, proto="both"):
+            return [777] if proto in ("udp", "both") else []
 
-        def find_bindings_on_port(self, port, proto="tcp"):
-            if proto == "udp":
-                return [_binding(5353, pid=777, name="dnsmasq", proto="udp")]
+        def find_bindings_on_port(self, port, proto="both"):
+            if proto in ("udp", "both"):
+                return [_binding(TEST_PORT, pid=777, name="dnsmasq", proto="udp")]
             return []
 
         def kill_port(self, port, **kwargs):
             killed.append(port)
             return True, "killed"
 
-    args = _args(command="kill", port=5353, json=True, proto="udp")
+    args = _args(command="kill", port=TEST_PORT, json=True, proto="udp")
     with patch("kport.cli_commands.docker_mappings_for_host_port", return_value=[]):
         rc = handle_product_command(args, UDPKillInspector())
     assert rc == EXIT_OK
-    assert 5353 in killed
+    assert TEST_PORT in killed
+
+
+@pytest.mark.cli
+def test_kill_protected_udp_port_blocked(capsys):
+    """Port 5353/UDP (mDNS) is in PROTECTED_UDP_PORTS and must be rejected."""
+    class MDNSInspector(FakeInspector):
+        def find_pids_on_port(self, port, proto="both"):
+            return [999]
+
+        def find_bindings_on_port(self, port, proto="both"):
+            return [_binding(5353, pid=999, name="avahi-daemon", proto="udp")]
+
+    args = _args(command="kill", port=5353, json=True, proto="udp")
+    with patch("kport.cli_commands.docker_mappings_for_host_port", return_value=[]):
+        rc = handle_product_command(args, MDNSInspector())
+    assert rc == EXIT_PERMISSION
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["data"]["success"] is False
+    assert "protected" in envelope["data"]["message"].lower()
 
 
 @pytest.mark.cli
@@ -426,4 +448,176 @@ def test_hold_command_occupied_returns_error(capsys):
     with patch("kport.cli_commands.docker_mappings_for_host_port", return_value=[]):
         rc = handle_product_command(args, inspector)
         assert rc != EXIT_OK
+
+
+@pytest.mark.cli
+def test_kill_dual_protocol_choice_tcp_only(capsys):
+    kill_calls = []
+
+    class DualInspector(FakeInspector):
+        def find_pids_on_port(self, port, proto="both"):
+            if proto == "tcp":
+                return [101]
+            if proto == "udp":
+                return [102]
+            return [101, 102]
+
+        def find_bindings_on_port(self, port, proto="both"):
+            bindings = [
+                _binding(8855, pid=101, name="node", proto="tcp"),
+                _binding(8855, pid=102, name="dns-forwarder", proto="udp"),
+            ]
+            if proto == "tcp":
+                return [b for b in bindings if b.proto == "tcp"]
+            if proto == "udp":
+                return [b for b in bindings if b.proto == "udp"]
+            return bindings
+
+        def kill_port(self, port, **kwargs):
+            kill_calls.append((port, kwargs.get("proto")))
+            return True, "freed"
+
+    args = _args(command="kill", port=8855, json=False, yes=False, proto="both")
+    with patch("builtins.input", return_value="2"), \
+         patch("kport.cli_commands.docker_mappings_for_host_port", return_value=[]):
+        rc = handle_product_command(args, DualInspector())
+    assert rc == EXIT_OK
+    assert kill_calls == [(8855, "tcp")]
+    out = capsys.readouterr().out
+    assert "dual-protocol listeners" in out
+
+
+@pytest.mark.cli
+def test_kill_dual_protocol_choice_udp_only(capsys):
+    kill_calls = []
+
+    class DualInspector(FakeInspector):
+        def find_pids_on_port(self, port, proto="both"):
+            if proto == "tcp":
+                return [101]
+            if proto == "udp":
+                return [102]
+            return [101, 102]
+
+        def find_bindings_on_port(self, port, proto="both"):
+            bindings = [
+                _binding(8855, pid=101, name="node", proto="tcp"),
+                _binding(8855, pid=102, name="dns-forwarder", proto="udp"),
+            ]
+            if proto == "tcp":
+                return [b for b in bindings if b.proto == "tcp"]
+            if proto == "udp":
+                return [b for b in bindings if b.proto == "udp"]
+            return bindings
+
+        def kill_port(self, port, **kwargs):
+            kill_calls.append((port, kwargs.get("proto")))
+            return True, "freed"
+
+    args = _args(command="kill", port=8855, json=False, yes=False, proto="both")
+    with patch("builtins.input", return_value="3"), \
+         patch("kport.cli_commands.docker_mappings_for_host_port", return_value=[]):
+        rc = handle_product_command(args, DualInspector())
+    assert rc == EXIT_OK
+    assert kill_calls == [(8855, "udp")]
+
+
+@pytest.mark.cli
+def test_kill_dual_protocol_cancel(capsys):
+    kill_calls = []
+
+    class DualInspector(FakeInspector):
+        def find_pids_on_port(self, port, proto="both"):
+            return [101, 102]
+
+        def find_bindings_on_port(self, port, proto="both"):
+            return [
+                _binding(8855, pid=101, name="node", proto="tcp"),
+                _binding(8855, pid=102, name="dns-forwarder", proto="udp"),
+            ]
+
+        def kill_port(self, port, **kwargs):
+            kill_calls.append((port, kwargs.get("proto")))
+            return True, "freed"
+
+    args = _args(command="kill", port=8855, json=False, yes=False, proto="both")
+    with patch("builtins.input", return_value="q"), \
+         patch("kport.cli_commands.docker_mappings_for_host_port", return_value=[]):
+        rc = handle_product_command(args, DualInspector())
+    assert rc != EXIT_OK
+    assert kill_calls == []
+    assert "Operation cancelled" in capsys.readouterr().out
+
+
+@pytest.mark.cli
+def test_kill_single_protocol_prompt_mentions_proto(capsys):
+    kill_calls = []
+
+    class SingleInspector(FakeInspector):
+        def find_pids_on_port(self, port, proto="both"):
+            return [101] if proto in ("tcp", "both") else []
+
+        def find_bindings_on_port(self, port, proto="both"):
+            return [_binding(8855, pid=101, name="node", proto="tcp")]
+
+        def kill_port(self, port, **kwargs):
+            kill_calls.append((port, kwargs.get("proto")))
+            return True, "freed"
+
+    args = _args(command="kill", port=8855, json=False, yes=False, proto="both")
+    prompt_asked = []
+
+    def mock_confirm(msg, assume_yes=False):
+        prompt_asked.append(msg)
+        return True
+
+    with patch("kport.cli_commands.confirm_prompt", side_effect=mock_confirm), \
+         patch("kport.cli_commands.docker_mappings_for_host_port", return_value=[]):
+        rc = handle_product_command(args, SingleInspector())
+    assert rc == EXIT_OK
+    assert len(prompt_asked) == 1
+    assert "Kill TCP listener(s)" in prompt_asked[0]
+    assert "[TCP]" in prompt_asked[0]
+
+
+@pytest.mark.cli
+def test_hold_command_success_text_shows_proto(capsys):
+    inspector = FakeInspector(listening=[])
+    args = _args(command="hold", port=9997, proto="tcp", timeout=None, json=False)
+    with patch("builtins.input", return_value=""), \
+         patch("kport.cli_commands.docker_mappings_for_host_port", return_value=[]):
+        rc = handle_product_command(args, inspector)
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "Port 9997 (TCP) is reserved" in out
+    assert "Port 9997 (TCP) released" in out
+
+
+@pytest.mark.cli
+def test_hold_command_udp_shows_proto(capsys):
+    inspector = FakeInspector(listening=[])
+    args = _args(command="hold", port=9996, proto="udp", timeout=None, json=False)
+    with patch("builtins.input", return_value=""), \
+         patch("kport.cli_commands.docker_mappings_for_host_port", return_value=[]):
+        rc = handle_product_command(args, inspector)
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "Port 9996 (UDP) is reserved" in out
+
+
+@pytest.mark.cli
+def test_print_port_bindings_detail_groups_same_pid(capsys):
+    from kport.formatter import print_port_bindings_detail
+    bindings = [
+        _binding(5000, pid=25620, name="python3.exe", proto="tcp", laddr="0.0.0.0:5000"),
+        _binding(5000, pid=25620, name="python3.exe", proto="tcp", laddr=":::5000"),
+    ]
+    inspector = FakeInspector()
+    print_port_bindings_detail(5000, bindings, inspector)
+    out = capsys.readouterr().out
+    assert "25620" in out
+    assert out.count("python3.exe") == 1
+    assert "0.0.0.0:5000, :::5000" in out
+
+
 

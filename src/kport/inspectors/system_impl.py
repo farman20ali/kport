@@ -557,6 +557,7 @@ def _get_extended_udp_table_ipv4() -> list[PortBinding]:
                 pid=pid,
                 process_name=None,
                 state="UDP",
+                proto="udp",
             )
         )
 
@@ -604,6 +605,7 @@ def _get_extended_udp_table_ipv6() -> list[PortBinding]:
                 pid=pid,
                 process_name=None,
                 state="UDP",
+                proto="udp",
             )
         )
 
@@ -978,7 +980,7 @@ class FallbackInspector(BaseInspector):
             proto=proto,
         )
 
-    def list_listening(self, proto: str = "tcp") -> list[PortBinding]:
+    def list_listening(self, proto: str = "both") -> list[PortBinding]:
         self._clear_cache()  # C1: always fresh snapshot
         if self.system == "Windows":
             bindings: list[PortBinding] = []
@@ -1045,7 +1047,7 @@ class FallbackInspector(BaseInspector):
 
         return bindings
 
-    def find_bindings_on_port(self, port: int, proto: str = "tcp") -> list[PortBinding]:
+    def find_bindings_on_port(self, port: int, proto: str = "both") -> list[PortBinding]:
         self._clear_cache()  # C1
         if self.system == "Windows":
             try:
@@ -1075,7 +1077,7 @@ class FallbackInspector(BaseInspector):
             return [b for b in self._unix_listening(proto=proto) if b.port == port]
 
     def _windows_bindings_on_port(
-        self, port: int, proto: str = "tcp"
+        self, port: int, proto: str = "both"
     ) -> list[PortBinding]:
         bindings: list[PortBinding] = []
         self._ensure_tasklist_cache()
@@ -1167,7 +1169,7 @@ class FallbackInspector(BaseInspector):
             pass
         return sorted(bindings, key=lambda b: b.port)
 
-    def _windows_listening(self, proto: str = "tcp") -> list[PortBinding]:
+    def _windows_listening(self, proto: str = "both") -> list[PortBinding]:
         bindings: list[PortBinding] = []
         self._ensure_tasklist_cache()
 
@@ -1248,7 +1250,7 @@ class FallbackInspector(BaseInspector):
             pass
         return sorted(bindings, key=lambda b: b.port)
 
-    def _unix_listening(self, proto: str = "tcp") -> list[PortBinding]:
+    def _unix_listening(self, proto: str = "both") -> list[PortBinding]:
         bindings: list[PortBinding] = []
         if shutil.which("lsof"):
             try:
@@ -1363,7 +1365,7 @@ class FallbackInspector(BaseInspector):
                     pass
         return sorted(bindings, key=lambda b: b.port)
 
-    def find_pids_on_port(self, port: int, proto: str = "tcp") -> list[int]:
+    def find_pids_on_port(self, port: int, proto: str = "both") -> list[int]:
         self._clear_cache()  # C1
         if self.system == "Windows":
             try:
@@ -1420,7 +1422,7 @@ class FallbackInspector(BaseInspector):
                 pass
             return self._unix_pids_on_port(port, proto=proto)
 
-    def _windows_pids_on_port(self, port: int, proto: str = "tcp") -> list[int]:
+    def _windows_pids_on_port(self, port: int, proto: str = "both") -> list[int]:
         pids = set()
 
         def _collect(data):
@@ -1476,7 +1478,7 @@ class FallbackInspector(BaseInspector):
                         continue
         return sorted(pids)
 
-    def _unix_pids_on_port(self, port: int, proto: str = "tcp") -> list[int]:
+    def _unix_pids_on_port(self, port: int, proto: str = "both") -> list[int]:
         pids = set()
         if shutil.which("lsof"):
             # Use lsof's protocol-specific filter: TCP:port, UDP:port, or :port for both
@@ -1669,7 +1671,7 @@ class FallbackInspector(BaseInspector):
                 return sorted(set(pids))
 
     def find_ports_by_process_name(
-        self, name: str, exact: bool = False, proto: str = "tcp"
+        self, name: str, exact: bool = False, proto: str = "both"
     ) -> list[PortBinding]:
         """
         Find all port bindings for processes matching `name`.
@@ -1849,6 +1851,8 @@ class FallbackInspector(BaseInspector):
             except (subprocess.SubprocessError, OSError):
                 pass
 
+        if proto != "both":
+            results = [b for b in results if b.proto == proto]
         return sorted(results, key=lambda b: (b.pid or 0, b.port))
 
     def send_signal(self, pid: int, sig: int) -> bool:

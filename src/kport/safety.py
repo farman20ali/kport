@@ -22,7 +22,7 @@ import json
 import os
 from typing import Any
 
-from .constants import PROTECTED_PORTS, PROTECTED_PROCESS_NAMES
+from .constants import PROTECTED_PORTS, PROTECTED_PROCESS_NAMES, PROTECTED_UDP_PORTS
 from .inspectors import BaseInspector
 
 # ---------------------------------------------------------------------------
@@ -117,8 +117,8 @@ class SafetyDecision:
 
 def resolve_protected_sets(
     config: dict[str, Any] | None = None,
-) -> tuple[set[int], set[str]]:
-    """Return the effective (ports, process-names) protection sets.
+) -> tuple[set[int], set[str], set[int]]:
+    """Return the effective (ports, process-names, udp-ports) protection sets.
 
     Configuration values are ADDITIVE — they extend the hard-coded defaults,
     never replace them.  This preserves the Phase 2 correctness guarantee.
@@ -139,7 +139,14 @@ def resolve_protected_sets(
             p.lower() for p in config_procs if isinstance(p, str)
         )
 
-    return protected_ports, protected_procs
+    protected_udp: set[int] = set(PROTECTED_UDP_PORTS)
+    config_udp = cfg.get("protected_udp_ports")
+    if isinstance(config_udp, list):
+        protected_udp.update(
+            p for p in config_udp if isinstance(p, int)
+        )
+
+    return protected_ports, protected_procs, protected_udp
 
 
 def check_safety_policy(
@@ -148,6 +155,7 @@ def check_safety_policy(
     inspector: BaseInspector,
     bypass_safety: bool = False,
     config: dict[str, Any] | None = None,
+    proto: str = "both",
 ) -> SafetyDecision:
     """Evaluate whether a destructive operation on *port* / *pids* is safe.
 
@@ -165,15 +173,18 @@ def check_safety_policy(
     config:
         Pre-loaded configuration dict.  When ``None``, no config-level
         overrides are applied (defaults still apply).
+    proto:
+        Protocol context: ``'tcp'``, ``'udp'``, or ``'both'``.  When ``'udp'``
+        or ``'both'``, UDP-specific port protections are also applied.
 
     Returns
     -------
     SafetyDecision
         Supports ``allowed, reason = decision`` unpacking.
     """
-    protected_ports, protected_procs = resolve_protected_sets(config)
+    protected_ports, protected_procs, protected_udp = resolve_protected_sets(config)
 
-    # 1. Port-level protection
+    # 1. Port-level protection (TCP+UDP shared list)
     if port is not None and port in protected_ports:
         if bypass_safety:
             return SafetyDecision(True, "", policy_source="bypass")
@@ -186,7 +197,21 @@ def check_safety_policy(
             policy_source="default",
         )
 
-    # 2. Process-level protection
+    # 2. UDP-specific port protection
+    if proto in ("udp", "both") and port is not None and port in protected_udp:
+        if bypass_safety:
+            return SafetyDecision(True, "", policy_source="bypass")
+        return SafetyDecision(
+            False,
+            (
+                f"Security Shield Active: Port {port}/UDP is a protected system "
+                "UDP service (e.g. DNS, DHCP, NTP). "
+                "Action aborted. Use --bypass-safety to override."
+            ),
+            policy_source="default",
+        )
+
+    # 3. Process-level protection
     for pid in pids:
         try:
             info = inspector.get_process_info(pid)

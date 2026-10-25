@@ -192,7 +192,7 @@ def test_stop_service_success_and_verified_free(capsys):
     out = capsys.readouterr().out
     assert "nginx.service" in out
     assert "now free" in out
-    mock_poll.assert_called_once_with(8080, 3.0, inspector)
+    mock_poll.assert_called_once_with(8080, 3.0, inspector, proto='tcp')
     mock_audit.assert_called_once()
 
 
@@ -273,7 +273,8 @@ def test_stop_service_escalation_force_success(capsys):
                 force=True,
                 dry_run=False,
                 debug=False,
-                assume_yes=True
+                assume_yes=True,
+                proto='tcp',
             )
             
     assert rc == EXIT_OK

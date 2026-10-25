@@ -25,6 +25,7 @@ def poll_until_free(
     timeout: float,
     inspector: BaseInspector,
     interval: float = 0.2,
+    proto: str = "both",
 ) -> bool:
     """Poll *port* until it has no active bindings, up to *timeout* seconds.
 
@@ -45,11 +46,13 @@ def poll_until_free(
         Active :class:`~kport.inspectors.BaseInspector` used to query bindings.
     interval:
         Sleep duration in seconds between successive polls. Defaults to 0.2 s.
+    proto:
+        Protocol filter: 'tcp', 'udp', or 'both'. Defaults to 'both'.
     """
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            bindings = inspector.find_bindings_on_port(port)
+            bindings = inspector.find_bindings_on_port(port, proto=proto)
         except (OSError, ValueError, IndexError, subprocess.SubprocessError):
             bindings = []
         if not bindings:
@@ -57,7 +60,7 @@ def poll_until_free(
         time.sleep(interval)
     # Final check after the loop
     try:
-        bindings = inspector.find_bindings_on_port(port)
+        bindings = inspector.find_bindings_on_port(port, proto=proto)
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
         bindings = []
     return len(bindings) == 0

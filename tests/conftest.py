@@ -103,12 +103,23 @@ class FakeInspector(BaseInspector):
     def find_pids_on_port(self, port: int, proto: str = "tcp"):
         if port in self._pids:
             return self._pids[port]
-        return sorted({b.pid for b in self._listening if getattr(b, "port", None) == port and getattr(b, "pid", None)})
+        p = proto.lower()
+        return sorted({
+            b.pid for b in self._listening
+            if getattr(b, "port", None) == port
+            and getattr(b, "pid", None)
+            and (p == "both" or getattr(b, "proto", "tcp").lower() == p)
+        })
 
     def find_bindings_on_port(self, port: int, proto: str = "tcp"):
         if port in self._bindings:
             return self._bindings[port]
-        return [b for b in self._listening if getattr(b, "port", None) == port]
+        p = proto.lower()
+        return [
+            b for b in self._listening
+            if getattr(b, "port", None) == port
+            and (p == "both" or getattr(b, "proto", "tcp").lower() == p)
+        ]
 
     def get_process_info(self, pid: int):
         return self._info.get(pid)
