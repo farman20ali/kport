@@ -25,6 +25,17 @@ from kport.constants import RUNTIME_ENRICHMENT_NAMES
 # ---------------------------------------------------------------------------
 
 
+def _cross_basename(path: str) -> str:
+    """Extract file basename handling both Windows (\\) and POSIX (/) path separators."""
+    if not path:
+        return ""
+    p = path.rstrip("/\\")
+    idx = max(p.rfind("/"), p.rfind("\\"))
+    if idx >= 0:
+        return p[idx + 1 :]
+    return p
+
+
 def enrich_process_name(name: str, cmdline: list[str] | None) -> str:
     """
     Enrich generic runtime process names with their script / module / jar.
@@ -45,10 +56,10 @@ def enrich_process_name(name: str, cmdline: list[str] | None) -> str:
     if k8s:
         return f"{name} ({k8s.summary})"
 
-    base = os.path.basename(name).lower()
+    base = _cross_basename(name).lower()
     if base.endswith(".exe"):
         base = base[:-4]
-    name_base = name.lower()
+    name_base = _cross_basename(name).lower()
     if name_base.endswith(".exe"):
         name_base = name_base[:-4]
     if (
@@ -69,10 +80,11 @@ def enrich_process_name(name: str, cmdline: list[str] | None) -> str:
             return f"{name} ({module})"
         # Java -jar <file>
         if arg in ("-jar", "--jar") and i + 1 < len(args):
-            return f"{name} ({os.path.basename(args[i + 1])})"
+            return f"{name} ({_cross_basename(args[i + 1])})"
         # Any argument that looks like a script/jar file and isn't a flag
         if not arg.startswith("-"):
-            _, ext = os.path.splitext(arg)
+            b_arg = _cross_basename(arg)
+            _, ext = os.path.splitext(b_arg)
             if ext.lower() in (
                 ".js",
                 ".mjs",
@@ -87,18 +99,18 @@ def enrich_process_name(name: str, cmdline: list[str] | None) -> str:
                 ".pl",
                 ".pm",
             ):
-                return f"{name} ({os.path.basename(arg)})"
+                return f"{name} ({b_arg})"
             # Windows entry point script like C:\...\Scripts\kport.exe
             if ext.lower() == ".exe" and base in {"python", "python3", "python2", "pythonw"}:
-                script_base = os.path.basename(arg)[:-4]
+                script_base = b_arg[:-4]
                 return f"{name} ({script_base})"
             # Extensionless entry point on Unix (e.g. /usr/local/bin/kport)
             if not ext and base in {"python", "python3", "python2", "pythonw"}:
-                script_base = os.path.basename(arg)
+                script_base = b_arg
                 return f"{name} ({script_base})"
             # node / bun / deno — first positional that is a bare file name
             if base in {"node", "nodejs", "bun", "deno", "tsx", "ts-node"}:
-                return f"{name} ({os.path.basename(arg)})"
+                return f"{name} ({b_arg})"
         i += 1
 
     return name
@@ -112,10 +124,10 @@ def extract_runtime_target(name: str, cmdline: list[str] | None) -> str | None:
     if not cmdline or len(cmdline) < 2:
         return None
 
-    base = os.path.basename(name).lower()
+    base = _cross_basename(name).lower()
     if base.endswith(".exe"):
         base = base[:-4]
-    name_base = name.lower()
+    name_base = _cross_basename(name).lower()
     if name_base.endswith(".exe"):
         name_base = name_base[:-4]
 
@@ -130,10 +142,10 @@ def extract_runtime_target(name: str, cmdline: list[str] | None) -> str | None:
         if arg == "-m" and i + 1 < len(args):
             return args[i + 1]
         if arg in ("-jar", "--jar") and i + 1 < len(args):
-            jar_base = os.path.basename(args[i + 1])
+            jar_base = _cross_basename(args[i + 1])
             return jar_base[:-4] if jar_base.lower().endswith(".jar") else jar_base
         if not arg.startswith("-"):
-            b_name = os.path.basename(arg)
+            b_name = _cross_basename(arg)
             b_lower = b_name.lower()
             if b_lower.endswith((".exe", ".jar", ".py", ".js", ".ts", ".rb", ".php", ".mjs", ".cjs")):
                 return b_name.rsplit(".", 1)[0]
@@ -165,18 +177,18 @@ def matches_process_name(
     target_clean = target_lower[:-4] if target_lower.endswith(".exe") else target_lower
 
     # 1. Check proc_name
-    pname_lower = (proc_name or "").lower()
-    pname_clean = pname_lower[:-4] if pname_lower.endswith(".exe") else pname_lower
+    pname_base = _cross_basename(proc_name or "").lower()
+    pname_clean = pname_base[:-4] if pname_base.endswith(".exe") else pname_base
     if exact:
-        if pname_lower == target_lower or pname_clean == target_clean:
+        if pname_base == target_lower or pname_clean == target_clean:
             return True
     else:
-        if target_clean in pname_clean or target_lower in pname_lower:
+        if target_clean in pname_clean or target_lower in pname_base:
             return True
 
     # 2. Check cmdline[0] (the executable path itself)
     if cmdline and len(cmdline) > 0 and cmdline[0]:
-        exe_base = os.path.basename(cmdline[0]).lower()
+        exe_base = _cross_basename(cmdline[0]).lower()
         exe_clean = exe_base[:-4] if exe_base.endswith(".exe") else exe_base
         if exact:
             if exe_base == target_lower or exe_clean == target_clean:
