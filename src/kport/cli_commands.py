@@ -2933,10 +2933,40 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
         pname = args.inspect_process
         proto_req = getattr(args, "proto", "both")
         bindings = inspector.find_ports_by_process_name(pname, exact=args.exact, proto=proto_req)
+        all_matching_pids = inspector.find_pids_by_name(pname, exact=args.exact)
+        bound_pids = {b.pid for b in bindings if b.pid}
+        inactive_pids = [p for p in all_matching_pids if p not in bound_pids]
+
         if args.json:
-            print(_json_out("inspect-process", {"process": pname, "bindings": [asdict(b) for b in bindings]}))
+            pids_json = []
+            for pid in sorted(bound_pids):
+                info = inspector.get_process_info(pid)
+                pids_json.append({"pid": pid, "process": asdict(info) if info else None})
+
+            inactive_json = []
+            for p in inactive_pids:
+                p_info = inspector.get_process_info(p)
+                child_pids = [
+                    b_pid
+                    for b_pid in bound_pids
+                    if inspector.get_process_info(b_pid)
+                    and inspector.get_process_info(b_pid).ppid == p
+                ]
+                inactive_json.append({
+                    "pid": p,
+                    "process": asdict(p_info) if p_info else None,
+                    "is_parent_of": child_pids,
+                })
+
+            out_data = {
+                "process": pname,
+                "bindings": [asdict(b) for b in bindings],
+                "processes": pids_json,
+                "inactive_processes": inactive_json,
+            }
+            print(_json_out("inspect-process", out_data))
             if not bindings:
-                pids = inspector.find_pids_by_name(pname, exact=args.exact)
+                pids = all_matching_pids
                 if pids:
                     pids_str = ", ".join(map(str, pids))
                     other_proto = "udp" if proto_req == "tcp" else ("tcp" if proto_req == "udp" else None)
@@ -2991,7 +3021,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                 )
             )
             if not bindings:
-                pids = inspector.find_pids_by_name(pname, exact=args.exact)
+                pids = all_matching_pids
                 if pids:
                     pids_str = (
                         f"{', '.join(map(str, pids[:5]))}, ... ({len(pids)} instances total)"
@@ -3048,6 +3078,20 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                                 Colors.CYAN,
                             )
                         )
+                        for pid in pids[:5]:
+                            info = inspector.get_process_info(pid)
+                            if info:
+                                print(f"  • PID {pid}: {info.name}")
+                                if info.cmdline:
+                                    print(f"    Command:    {' '.join(info.cmdline)}")
+                                if info.user:
+                                    print(f"    User:       {info.user}")
+                                if info.ppid:
+                                    parent_info = inspector.get_process_info(info.ppid)
+                                    parent_label = f" ({parent_info.name})" if parent_info else ""
+                                    print(f"    Parent PID: {info.ppid}{parent_label}")
+                                if info.cwd:
+                                    print(f"    CWD:        {info.cwd}")
                         try:
                             active_conns = _filter_connections_data(inspector, process=pname, max_results=10)
                         except Exception:  # noqa: BLE001
@@ -3094,13 +3138,59 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                         proto_badge_p = colorize(f"{proto_p:<8}", proto_color_p)
                         addr_p = p.laddr or "-"
                         print(f"{'':<8} {'':<18} {p.port:<8} {proto_badge_p} {p.state or '-':<10} {addr_p}")
-                print(
-                    colorize(
-                        f"\n\u2713 Total processes found: {len(pid_groups)}",
-                        Colors.GREEN,
+
+                    # Detailed process card metadata (Command, User, Parent PID, CWD)
+                    info = inspector.get_process_info(pid)
+                    if info:
+                        if info.cmdline:
+                            print(f"         Command:    {' '.join(info.cmdline)}")
+                        if info.user:
+                            print(f"         User:       {info.user}")
+                        if info.ppid:
+                            parent_info = inspector.get_process_info(info.ppid)
+                            parent_label = f" ({parent_info.name})" if parent_info else ""
+                            print(f"         Parent PID: {info.ppid}{parent_label}")
+                        if info.cwd:
+                            print(f"         CWD:        {info.cwd}")
+
+                if inactive_pids:
+                    print(
+                        colorize(
+                            f"\nℹ Other running process(es) matching '{pname}' (no active listening ports):",
+                            Colors.CYAN,
+                        )
                     )
-                )
-                print(colorize(f"\u2713 Total connections: {len(bindings)}", Colors.GREEN))
+                    for p in inactive_pids:
+                        p_info = inspector.get_process_info(p)
+                        if p_info:
+                            child_pids = [
+                                b_pid
+                                for b_pid in pid_groups
+                                if inspector.get_process_info(b_pid)
+                                and inspector.get_process_info(b_pid).ppid == p
+                            ]
+                            relation_note = (
+                                f" — Launcher / Parent of PID {', '.join(map(str, child_pids))}"
+                                if child_pids
+                                else ""
+                            )
+                            print(f"  • PID {p}: {p_info.name}{relation_note}")
+                            if p_info.cmdline:
+                                print(f"    Command:    {' '.join(p_info.cmdline)}")
+                            if p_info.user:
+                                print(f"    User:       {p_info.user}")
+                            if p_info.ppid:
+                                parent_info = inspector.get_process_info(p_info.ppid)
+                                parent_label = f" ({parent_info.name})" if parent_info else ""
+                                print(f"    Parent PID: {p_info.ppid}{parent_label}")
+                            if p_info.cwd:
+                                print(f"    CWD:        {p_info.cwd}")
+
+                total_summary = f"\n✓ Total processes: {len(pid_groups)} listening"
+                if inactive_pids:
+                    total_summary += f", {len(inactive_pids)} related/inactive"
+                print(colorize(total_summary, Colors.GREEN))
+                print(colorize(f"✓ Total connections: {len(bindings)}", Colors.GREEN))
 
     # Kill by process name (legacy)
     if args.kill_process:
