@@ -101,10 +101,76 @@ def test_psutil_inspector_permission_denied_graceful():
 def test_fallback_inspector_permission_denied_graceful():
     """Verify that fallback lookup errors are handled gracefully and don't raise exceptions."""
     inspector = FallbackInspector()
-    
+
     # If the process files are missing or read-only/permission error
     with patch("builtins.open", side_effect=PermissionError("Permission Denied")), \
          patch("os.readlink", side_effect=PermissionError("Permission Denied")):
         info = inspector.get_process_info(99999)
         # Even if files are inaccessible, we return None (process unreadable or gone)
         assert info is None
+
+
+def test_enrich_process_name_windows_exe_wrapper():
+    """Verify enrich_process_name detects pip console entrypoint .exe wrappers."""
+    from kport.inspectors.base import enrich_process_name
+
+    cmdline = ["python.exe", r"C:\Users\HP\.vfox\sdks\python\Scripts\kport.exe", "hold", "5000"]
+    enriched = enrich_process_name("python.exe", cmdline)
+    assert enriched == "python.exe (kport)"
+
+
+def test_enrich_process_name_unix_extensionless_wrapper():
+    """Verify enrich_process_name detects Unix extensionless script entrypoints."""
+    from kport.inspectors.base import enrich_process_name
+
+    cmdline = ["/usr/bin/python3", "/usr/local/bin/kport", "hold", "5000"]
+    enriched = enrich_process_name("python3", cmdline)
+    assert enriched == "python3 (kport)"
+
+
+def test_matches_process_name_exact_and_substring():
+    """Verify matches_process_name matches process names cleanly."""
+    from kport.inspectors.base import matches_process_name
+
+    assert matches_process_name("code.exe", None, "code", exact=True)
+    assert matches_process_name("Code.exe", None, "code", exact=False)
+    assert matches_process_name("kport.exe", None, "kport", exact=True)
+    assert not matches_process_name("code.exe", None, "kport", exact=False)
+
+
+def test_matches_process_name_runtime_script():
+    """Verify matches_process_name matches script module/entrypoint for runtimes."""
+    from kport.inspectors.base import matches_process_name
+
+    cmd_kport = ["python.exe", r"C:\Python\Scripts\kport.exe", "hold", "5000"]
+    assert matches_process_name("python.exe", cmd_kport, "kport", exact=True)
+    assert matches_process_name("python.exe", cmd_kport, "kport", exact=False)
+
+    cmd_module = ["python", "-m", "kport", "watch"]
+    assert matches_process_name("python", cmd_module, "kport", exact=True)
+
+    cmd_node = ["node", "/path/to/server.js"]
+    assert matches_process_name("node", cmd_node, "server", exact=True)
+
+
+def test_matches_process_name_does_not_match_arbitrary_cli_paths():
+    """
+    CRITICAL SECURITY & ACCURACY TEST:
+    Verify that unrelated processes (like language servers or IDEs) whose cmdline
+    merely contains a directory path with 'kport' DO NOT match.
+    """
+    from kport.inspectors.base import matches_process_name
+
+    lsp_cmd = [
+        r"C:\Extensions\language_server_windows_x64.exe",
+        "--workspace",
+        r"d:\workspace\dev\kport",
+    ]
+    assert not matches_process_name("language_server_windows_x64.exe", lsp_cmd, "kport", exact=False)
+
+    ide_cmd = [
+        r"C:\Program Files\Antigravity IDE\Antigravity IDE.exe",
+        "--folder-uri",
+        r"file:///d:/workspace/dev/kport",
+    ]
+    assert not matches_process_name("Antigravity IDE.exe", ide_cmd, "kport", exact=False)

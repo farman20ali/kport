@@ -95,6 +95,10 @@ TOOLS = [
                     "default": "stop",
                     "description": "The action to perform if the port belongs to a Docker container (stop, restart, or remove container).",
                 },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Optional AI agent identifier for MCP v2 safety rule evaluation.",
+                },
             },
             "required": ["port"],
         },
@@ -191,7 +195,11 @@ TOOLS = [
                     "type": "boolean",
                     "default": False,
                     "description": "Show stop command without running it.",
-                }
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Optional AI agent identifier for MCP v2 safety rule evaluation.",
+                },
             },
             "required": ["port"],
         },
@@ -281,6 +289,10 @@ TOOLS = [
                     "default": False,
                     "description": "Whether to kill the process and all of its descendants.",
                 },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Optional AI agent identifier for MCP v2 safety rule evaluation.",
+                },
             },
             "required": ["pid"],
         },
@@ -310,6 +322,10 @@ TOOLS = [
                     "type": "boolean",
                     "default": False,
                     "description": "Whether to kill matching processes and all descendants.",
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Optional AI agent identifier for MCP v2 safety rule evaluation.",
                 },
             },
             "required": ["name"],
@@ -433,6 +449,67 @@ TOOLS = [
         "annotations": {"readOnlyHint": True},
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "inspect_process",
+        "description": "Finds all active port bindings and running process IDs for a given process name (e.g. 'nginx', 'node', 'python', 'kport').",
+        "annotations": {"readOnlyHint": True},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "process": {
+                    "type": "string",
+                    "description": "The process name or runtime script name to inspect.",
+                },
+                "exact": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Require exact process name match.",
+                },
+                "proto": {
+                    "type": "string",
+                    "enum": ["tcp", "udp", "both"],
+                    "default": "both",
+                    "description": "Network protocol filter.",
+                },
+            },
+            "required": ["process"],
+        },
+    },
+    {
+        "name": "swap",
+        "description": "Atomically frees a port and holds it to prevent race conditions, optionally executing a handover command to launch the new application immediately.",
+        "annotations": {"destructiveHint": True},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "description": "Target port number to atomically free and reserve.",
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Optional shell command to launch on the freed port (handover).",
+                },
+                "timeout": {
+                    "type": "number",
+                    "default": 30.0,
+                    "description": "Hold duration in seconds before automatically releasing if no handover command is run.",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Simulate the swap without killing or binding.",
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Optional AI agent identifier for MCP v2 safety rule evaluation.",
+                },
+            },
+            "required": ["port"],
+        },
+    },
 ]
 
 
@@ -463,15 +540,79 @@ def handle_inspect_pid(inspector, pid: int) -> dict[str, Any]:
     }
 
 
-def handle_kill_pid(inspector, pid: int, force: bool = False, kill_tree: bool = False) -> dict[str, Any]:
-    """Execute kill_pid tool request (destructive) under safety shield validations."""
+def _check_mcp_safety(
+    inspector,
+    action: str,
+    port: int | None = None,
+    pids: list[int] | None = None,
+    process_names: list[str] | None = None,
+    agent_id: str | None = None,
+) -> tuple[bool, str]:
+    """
+    Two-layer defense for MCP tool execution:
+    1. Static baseline safety policy (constants.PROTECTED_PORTS, PROTECTED_PROCESS_NAMES)
+    2. Dynamic MCP v2 Safety Ruleset (mcp_rules.py evaluate)
+    """
+    from .mcp_rules import evaluate, load_rules
+
+    # Layer 1: Static baseline policy
     cfg = load_mcp_config()
     allowed, reason = check_safety_policy(
-        port=None,
-        pids=[pid],
+        port=port,
+        pids=pids or [],
         inspector=inspector,
         bypass_safety=False,
         config=cfg if cfg else None,
+    )
+    if not allowed:
+        return False, f"Protected by Safety Policy: {reason}"
+
+    # Layer 2: Dynamic MCP v2 Rules
+    ruleset = load_rules()
+    target_pids = pids or [None]
+    for target_pid in target_pids:
+        pname = None
+        if target_pid and inspector:
+            try:
+                info = inspector.get_process_info(target_pid)
+                pname = info.name if info else None
+            except Exception:  # noqa: BLE001
+                pname = None
+        if not pname and process_names:
+            pname = process_names[0]
+
+        decision = evaluate(
+            ruleset=ruleset,
+            action=action,
+            port=port,
+            pid=target_pid,
+            process_name=pname,
+            agent_id=agent_id,
+        )
+        if not decision.allowed:
+            rule_tag = (
+                f" [rule: {decision.matched_rule_id}]"
+                if decision.matched_rule_id
+                else " [default policy]"
+            )
+            return (
+                False,
+                f"Blocked by MCP Safety Rules: {decision.reason}{rule_tag}",
+            )
+
+    return True, "Allowed"
+
+
+def handle_kill_pid(
+    inspector,
+    pid: int,
+    force: bool = False,
+    kill_tree: bool = False,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    """Execute kill_pid tool request (destructive) under safety shield validations."""
+    allowed, reason = _check_mcp_safety(
+        inspector, action="kill_pid", pids=[pid], agent_id=agent_id
     )
     if not allowed:
         return {
@@ -507,20 +648,20 @@ def handle_kill_pid(inspector, pid: int, force: bool = False, kill_tree: bool = 
 
 
 def handle_kill_process(
-    inspector, name: str, exact: bool = False, force: bool = False, kill_tree: bool = False
+    inspector,
+    name: str,
+    exact: bool = False,
+    force: bool = False,
+    kill_tree: bool = False,
+    agent_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute kill_process tool request (destructive) under safety shield validations."""
     pids = inspector.find_pids_by_name(name, exact=exact)
     if not pids:
         return {"success": True, "message": f"No processes found matching '{name}'."}
 
-    cfg = load_mcp_config()
-    allowed, reason = check_safety_policy(
-        port=None,
-        pids=pids,
-        inspector=inspector,
-        bypass_safety=False,
-        config=cfg if cfg else None,
+    allowed, reason = _check_mcp_safety(
+        inspector, action="kill_process", pids=pids, process_names=[name], agent_id=agent_id
     )
     if not allowed:
         return {
@@ -653,25 +794,22 @@ def handle_inspect_port(inspector, port: int) -> dict[str, Any]:
 
 
 def handle_kill_port(
-    inspector, port: int, force: bool = False, docker_action: str = "stop"
+    inspector,
+    port: int,
+    force: bool = False,
+    docker_action: str = "stop",
+    agent_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute kill_port tool request under safety shield validations."""
     if not (1 <= port <= 65535):
         raise ValueError(f"Port {port} is out of bounds (1-65535)")
 
-    # 1. Load configuration and retrieve target pids
-    cfg = load_mcp_config()
     inspector = get_inspector()
     pids = inspector.find_pids_on_port(port)
 
-    # 2. Unified safety policy check
-    # MCP server NEVER bypasses safety (so bypass_safety=False).
-    allowed, reason = check_safety_policy(
-        port=port,
-        pids=pids,
-        inspector=inspector,
-        bypass_safety=False,
-        config=cfg if cfg else None,
+    # 2. Unified two-layer safety check
+    allowed, reason = _check_mcp_safety(
+        inspector, action="kill_port", port=port, pids=pids, agent_id=agent_id
     )
     if not allowed:
         return {
@@ -853,7 +991,12 @@ def handle_get_audit_history(limit: int = 20) -> dict[str, Any]:
     }
 
 
-def handle_stop_service(inspector, port: int, dry_run: bool = False) -> dict[str, Any]:
+def handle_stop_service(
+    inspector,
+    port: int,
+    dry_run: bool = False,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
     """Execute stop_service tool request under safety shield validations."""
     if not (1 <= port <= 65535):
         raise ValueError(f"Port {port} is out of bounds (1-65535)")
@@ -863,14 +1006,9 @@ def handle_stop_service(inspector, port: int, dry_run: bool = False) -> dict[str
     data = _diagnose_port_data(port, inspector, config=cfg)
     pids = inspector.find_pids_on_port(port)
 
-    # 2. Safety policy check
-    # MCP server NEVER bypasses safety (bypass_safety=False).
-    allowed, reason = check_safety_policy(
-        port=port,
-        pids=pids,
-        inspector=inspector,
-        bypass_safety=False,
-        config=cfg if cfg else None,
+    # 2. Unified two-layer safety check
+    allowed, reason = _check_mcp_safety(
+        inspector, action="stop_service", port=port, pids=pids, agent_id=agent_id
     )
     if not allowed:
         return {
@@ -1066,6 +1204,136 @@ def handle_watcher_info() -> dict[str, Any]:
     return watcher_platform_info()
 
 
+def handle_inspect_process(
+    inspector,
+    process: str,
+    exact: bool = False,
+    proto: str = "both",
+) -> dict[str, Any]:
+    """Execute inspect_process tool request (read-only)."""
+    bindings = inspector.find_ports_by_process_name(process, exact=exact, proto=proto)
+    pids = inspector.find_pids_by_name(process, exact=exact)
+    return {
+        "process": process,
+        "bindings": [
+            {
+                "port": b.port,
+                "proto": b.proto,
+                "pid": b.pid,
+                "process_name": b.process_name,
+                "state": b.state,
+                "address": b.laddr,
+                "family": b.family,
+            }
+            for b in bindings
+        ],
+        "count": len(bindings),
+        "running_pids": pids,
+    }
+
+
+def handle_swap(
+    inspector,
+    port: int,
+    command: str | None = None,
+    timeout: float = 30.0,
+    dry_run: bool = False,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    """Atomically free a port and reserve/hand over."""
+    import socket
+    import subprocess
+    import time
+
+    if not (1 <= port <= 65535):
+        raise ValueError(f"Port {port} is out of bounds (1-65535)")
+
+    pids = inspector.find_pids_on_port(port)
+    bindings = inspector.find_bindings_on_port(port)
+    docker_hits = docker_mappings_for_host_port(port)
+
+    is_occupied = bool(pids or bindings or docker_hits)
+    if is_occupied:
+        allowed, reason = _check_mcp_safety(
+            inspector, action="swap", port=port, pids=pids, agent_id=agent_id
+        )
+        if not allowed:
+            return {"success": False, "port": port, "message": reason}
+
+        if dry_run:
+            return {
+                "success": True,
+                "port": port,
+                "dry_run": True,
+                "action": "would free and hold",
+                "message": f"Port {port} would be freed and held for atomic swap.",
+            }
+
+        freed = False
+        if docker_hits:
+            m = docker_hits[0]
+            ok, _ = docker_action_on_container(m.container_id, action="stop", dry_run=False)
+            freed = ok
+        if not freed and pids:
+            kill_ok, _ = inspector.kill_port(port, graceful_timeout=3.0, assume_yes=True)
+            freed = kill_ok
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if not inspector.find_pids_on_port(port) and not inspector.find_bindings_on_port(port):
+                freed = True
+                break
+            time.sleep(0.1)
+
+        if not freed:
+            return {"success": False, "port": port, "message": f"Failed to free port {port} for swap."}
+
+    if dry_run:
+        return {
+            "success": True,
+            "port": port,
+            "dry_run": True,
+            "action": "would hold",
+            "message": f"Port {port} is already free and would be held.",
+        }
+
+    holding_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if sys.platform == "win32":
+            SO_EXCLUSIVEADDRUSE = getattr(socket, "SO_EXCLUSIVEADDRUSE", -4)
+            holding_sock.setsockopt(socket.SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            holding_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        holding_sock.bind(("0.0.0.0", port))
+        holding_sock.listen(1)
+    except Exception as e:  # noqa: BLE001
+        holding_sock.close()
+        return {"success": False, "port": port, "message": f"Failed to bind holding socket: {e}"}
+
+    if command:
+        holding_sock.close()
+        try:
+            proc = subprocess.Popen(command, shell=True)
+            return {
+                "success": True,
+                "port": port,
+                "command": command,
+                "pid": proc.pid,
+                "message": f"Port {port} swapped and handed over to command.",
+            }
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "port": port, "message": f"Handover command failed to start: {e}"}
+
+    hold_duration = min(max(timeout, 0.1), 30.0)
+    time.sleep(hold_duration)
+    holding_sock.close()
+    return {
+        "success": True,
+        "port": port,
+        "message": f"Port {port} held for {hold_duration}s and successfully released.",
+    }
+
+
 def run_mcp_server() -> None:
     """Run standard stdio MCP JSON-RPC execution loop."""
     log("kport MCP Server successfully started.")
@@ -1117,8 +1385,9 @@ def run_mcp_server() -> None:
                         target_port = int(arguments.get("port"))
                         force_flag = bool(arguments.get("force", False))
                         docker_act = str(arguments.get("docker_action", "stop"))
+                        agent_id_val = arguments.get("agent_id")
                         result_data = handle_kill_port(
-                            inspector, target_port, force_flag, docker_act
+                            inspector, target_port, force_flag, docker_act, agent_id=agent_id_val
                         )
                     elif tool_name == "list_connections":
                         result_data = handle_list_connections(
@@ -1140,7 +1409,10 @@ def run_mcp_server() -> None:
                     elif tool_name == "stop_service":
                         target_port = int(arguments.get("port"))
                         dry_run_flag = bool(arguments.get("dry_run", False))
-                        result_data = handle_stop_service(inspector, target_port, dry_run_flag)
+                        agent_id_val = arguments.get("agent_id")
+                        result_data = handle_stop_service(
+                            inspector, target_port, dry_run_flag, agent_id=agent_id_val
+                        )
                     elif tool_name == "find_project":
                         pid_arg = arguments.get("pid")
                         path_arg = arguments.get("path")
@@ -1162,13 +1434,40 @@ def run_mcp_server() -> None:
                         target_pid = int(arguments.get("pid"))
                         force_flag = bool(arguments.get("force", False))
                         tree_flag = bool(arguments.get("kill_tree", False))
-                        result_data = handle_kill_pid(inspector, target_pid, force_flag, tree_flag)
+                        agent_id_val = arguments.get("agent_id")
+                        result_data = handle_kill_pid(
+                            inspector, target_pid, force_flag, tree_flag, agent_id=agent_id_val
+                        )
                     elif tool_name == "kill_process":
                         p_name = str(arguments.get("name"))
                         exact_flag = bool(arguments.get("exact", False))
                         force_flag = bool(arguments.get("force", False))
                         tree_flag = bool(arguments.get("kill_tree", False))
-                        result_data = handle_kill_process(inspector, p_name, exact_flag, force_flag, tree_flag)
+                        agent_id_val = arguments.get("agent_id")
+                        result_data = handle_kill_process(
+                            inspector, p_name, exact_flag, force_flag, tree_flag, agent_id=agent_id_val
+                        )
+                    elif tool_name == "inspect_process":
+                        p_name = str(arguments.get("process"))
+                        exact_flag = bool(arguments.get("exact", False))
+                        proto_val = str(arguments.get("proto", "both"))
+                        result_data = handle_inspect_process(
+                            inspector, p_name, exact=exact_flag, proto=proto_val
+                        )
+                    elif tool_name == "swap":
+                        target_port = int(arguments.get("port"))
+                        cmd_val = arguments.get("command")
+                        timeout_val = float(arguments.get("timeout", 30.0))
+                        dry_run_flag = bool(arguments.get("dry_run", False))
+                        agent_id_val = arguments.get("agent_id")
+                        result_data = handle_swap(
+                            inspector,
+                            target_port,
+                            command=cmd_val,
+                            timeout=timeout_val,
+                            dry_run=dry_run_flag,
+                            agent_id=agent_id_val,
+                        )
                     elif tool_name == "find_alternative_port":
                         target_port = int(arguments.get("port"))
                         cnt_val = int(arguments.get("count", 1))

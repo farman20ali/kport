@@ -88,12 +88,127 @@ def enrich_process_name(name: str, cmdline: list[str] | None) -> str:
                 ".pm",
             ):
                 return f"{name} ({os.path.basename(arg)})"
+            # Windows entry point script like C:\...\Scripts\kport.exe
+            if ext.lower() == ".exe" and base in {"python", "python3", "python2", "pythonw"}:
+                script_base = os.path.basename(arg)[:-4]
+                return f"{name} ({script_base})"
+            # Extensionless entry point on Unix (e.g. /usr/local/bin/kport)
+            if not ext and base in {"python", "python3", "python2", "pythonw"}:
+                script_base = os.path.basename(arg)
+                return f"{name} ({script_base})"
             # node / bun / deno — first positional that is a bare file name
             if base in {"node", "nodejs", "bun", "deno", "tsx", "ts-node"}:
                 return f"{name} ({os.path.basename(arg)})"
         i += 1
 
     return name
+
+
+def extract_runtime_target(name: str, cmdline: list[str] | None) -> str | None:
+    """
+    If the process is a runtime (Python, Node, Java, etc.), extract the script or module name
+    it is executing from its cmdline. Returns None if not a runtime or no target found.
+    """
+    if not cmdline or len(cmdline) < 2:
+        return None
+
+    base = os.path.basename(name).lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    name_base = name.lower()
+    if name_base.endswith(".exe"):
+        name_base = name_base[:-4]
+
+    if (
+        base not in RUNTIME_ENRICHMENT_NAMES
+        and name_base not in RUNTIME_ENRICHMENT_NAMES
+    ):
+        return None
+
+    args = cmdline[1:]
+    for i, arg in enumerate(args):
+        if arg == "-m" and i + 1 < len(args):
+            return args[i + 1]
+        if arg in ("-jar", "--jar") and i + 1 < len(args):
+            jar_base = os.path.basename(args[i + 1])
+            return jar_base[:-4] if jar_base.lower().endswith(".jar") else jar_base
+        if not arg.startswith("-"):
+            b_name = os.path.basename(arg)
+            b_lower = b_name.lower()
+            if b_lower.endswith((".exe", ".jar", ".py", ".js", ".ts", ".rb", ".php", ".mjs", ".cjs")):
+                return b_name.rsplit(".", 1)[0]
+            if base in {"python", "python3", "python2", "pythonw", "node", "nodejs", "bun", "deno"}:
+                return b_name
+    return None
+
+
+def matches_process_name(
+    proc_name: str,
+    cmdline: list[str] | None,
+    target: str,
+    exact: bool = False,
+) -> bool:
+    """
+    Match a process against a target name securely and accurately.
+    Matches:
+      1. Executable name (e.g. 'code.exe' or 'code' vs 'code')
+      2. cmdline[0] executable basename
+      3. Script / module name for runtimes (e.g. python -m kport -> matches 'kport')
+      4. Enriched process name (e.g. 'python.exe (kport)' -> matches 'kport')
+
+    Never matches arbitrary command-line flags or paths (e.g. --workspace /dir/kport
+    will NOT match unrelated language servers or IDEs).
+    """
+    target_lower = target.strip().lower()
+    if not target_lower:
+        return False
+    target_clean = target_lower[:-4] if target_lower.endswith(".exe") else target_lower
+
+    # 1. Check proc_name
+    pname_lower = (proc_name or "").lower()
+    pname_clean = pname_lower[:-4] if pname_lower.endswith(".exe") else pname_lower
+    if exact:
+        if pname_lower == target_lower or pname_clean == target_clean:
+            return True
+    else:
+        if target_clean in pname_clean or target_lower in pname_lower:
+            return True
+
+    # 2. Check cmdline[0] (the executable path itself)
+    if cmdline and len(cmdline) > 0 and cmdline[0]:
+        exe_base = os.path.basename(cmdline[0]).lower()
+        exe_clean = exe_base[:-4] if exe_base.endswith(".exe") else exe_base
+        if exact:
+            if exe_base == target_lower or exe_clean == target_clean:
+                return True
+        else:
+            if target_clean in exe_clean or target_lower in exe_base:
+                return True
+
+    # 3. Check runtime script/module target (e.g. python -m kport, node app.js)
+    runtime_target = extract_runtime_target(proc_name, cmdline)
+    if runtime_target:
+        rt_lower = runtime_target.lower()
+        rt_clean = rt_lower[:-4] if rt_lower.endswith((".exe", ".py", ".js", ".ts")) else rt_lower
+        if exact:
+            if rt_lower == target_lower or rt_clean == target_clean:
+                return True
+        else:
+            if target_clean in rt_clean or target_lower in rt_lower:
+                return True
+
+    # 4. Check enriched name
+    enriched = enrich_process_name(proc_name, cmdline)
+    if enriched and enriched != proc_name:
+        enriched_lower = enriched.lower()
+        if exact:
+            if enriched_lower == target_lower:
+                return True
+        else:
+            if target_clean in enriched_lower or target_lower in enriched_lower:
+                return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
