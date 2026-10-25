@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(5, 2, 0, 0),
-    prodvers=(5, 2, 0, 0),
+    filevers=(5, 3, 0, 0),
+    prodvers=(5, 3, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName',      u'Farman Ali'),
             StringStruct(u'FileDescription',  u'kport — Cross-platform port inspector and killer'),
-            StringStruct(u'FileVersion',      u'5.2.0.0'),
+            StringStruct(u'FileVersion',      u'5.3.0.0'),
             StringStruct(u'InternalName',     u'kport'),
             StringStruct(u'LegalCopyright',   u'Copyright (C) 2026 Farman Ali Ujjan. Apache License 2.0.'),
             StringStruct(u'OriginalFilename', u'kport.exe'),
             StringStruct(u'ProductName',      u'kport'),
-            StringStruct(u'ProductVersion',   u'5.2.0.0'),
+            StringStruct(u'ProductVersion',   u'5.3.0.0'),
           ]
         )
       ]
