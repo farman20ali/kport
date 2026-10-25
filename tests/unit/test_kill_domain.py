@@ -224,3 +224,25 @@ class TestNoPresentationImportInBase:
             content = fh.read()
         assert "from kport.formatter" not in content
         assert "from .formatter" not in content
+
+    def test_kill_pid_already_dead_process(self):
+        inspector = KillTestInspector()
+        inspector.is_alive[999] = False  # Process already dead
+        ok, msg = inspector.kill_pid(999)
+        assert ok is True
+        assert "already terminated" in msg.lower()
+        assert len(inspector.signals_sent) == 0
+
+    def test_kill_pid_winerror_87_handled_as_disappeared(self):
+        inspector = KillTestInspector()
+        inspector.is_alive[999] = True  # Initially reported alive
+
+        def fake_send_signal(pid, sig):
+            inspector.is_alive[pid] = False  # disappeared during kill
+            raise OSError(22, "[WinError 87] The parameter is incorrect")
+
+        inspector.send_signal = fake_send_signal
+        ok, msg = inspector.kill_pid(999)
+        assert ok is True
+        assert "disappeared" in msg.lower()
+

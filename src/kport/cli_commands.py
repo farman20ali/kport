@@ -1130,15 +1130,195 @@ def handle_hold(args: argparse.Namespace, inspector: BaseInspector) -> int:
     return EXIT_OK
 
 
-def handle_audit(args: argparse.Namespace) -> int:
-    """Display recent audit log history."""
-    limit = getattr(args, "limit", 20)
-    entries = audit.read_recent_audit_events(limit=limit)
+def handle_swap(args: argparse.Namespace, inspector: BaseInspector) -> int:
+    """Atomically free a port and hold/hand over to prevent race conditions."""
+    import socket
+    import subprocess
+    import time
 
-    if getattr(args, "json", False):
-        print(_json_out("audit", {"entries": entries}))
+    port = args.port
+    validate_port(port)
+
+    proto = getattr(args, "proto", "tcp").lower()
+    if proto not in ("tcp", "udp", "both"):
+        proto = "tcp"
+
+    # Step 1: Check existing occupancy
+    pids = inspector.find_pids_on_port(port, proto=proto)
+    bindings = inspector.find_bindings_on_port(port, proto=proto)
+    docker_hits = docker_mappings_for_host_port(port)
+
+    is_occupied = bool(pids or bindings or docker_hits)
+
+    if is_occupied:
+        # Check safety policy
+        safe, safety_msg = check_safety_policy(port, pids, args, inspector)
+        if not safe:
+            if getattr(args, "json", False):
+                print(_json_out("swap", {"port": port, "success": False, "error": safety_msg}))
+            else:
+                print(colorize(f"Safety Shield: {safety_msg}", Colors.RED), file=sys.stderr)
+            return EXIT_PERMISSION
+
+        # Prompt for confirmation if not yes and not json
+        if not getattr(args, "yes", False) and not getattr(args, "json", False):
+            who = f"PID {', '.join(map(str, pids))}" if pids else "occupying process"
+            if not confirm_prompt(f"Free port {port} currently held by {who} to perform atomic swap?", assume_yes=False):
+                print(colorize("Swap operation cancelled.", Colors.YELLOW))
+                return EXIT_GENERAL_ERROR
+
+        # Free the port: check if service-aware or container or local
+        freed = False
+        if docker_hits:
+            m = docker_hits[0]
+            ok, _ = docker_action_on_container(m.container_id, action="stop", dry_run=getattr(args, "dry_run", False))
+            freed = ok
+        elif getattr(args, "service_aware", False) and pids:
+            pm_infos = [detect_process_manager(pid) for pid in pids]
+            valid_pm = [pm for pm in pm_infos if pm]
+            if valid_pm:
+                pm = valid_pm[0]
+                mgr = pm["manager"]
+                svc_name = pm["name"]
+                res = stop_service(
+                    manager=mgr,
+                    service_name=svc_name,
+                    timeout=getattr(args, "graceful_timeout", 30.0) or 30.0,
+                    dry_run=getattr(args, "dry_run", False),
+                )
+                freed = res.success
+
+        if not freed and pids:
+            kill_ok, _ = inspector.kill_port(
+                port,
+                graceful_timeout=3.0,
+                force=getattr(args, "force", False),
+                dry_run=getattr(args, "dry_run", False),
+                assume_yes=True,
+            )
+            freed = kill_ok
+
+        # Wait for port to become free
+        if not getattr(args, "dry_run", False) and not _poll_until_free(port, 3.0, inspector, proto=proto):
+            if getattr(args, "json", False):
+                print(_json_out("swap", {"port": port, "success": False, "error": f"Failed to free port {port}"}))
+            else:
+                print(colorize(f"Error: Port {port} could not be freed in time.", Colors.RED), file=sys.stderr)
+            return EXIT_GENERAL_ERROR
+
+    if getattr(args, "dry_run", False):
+        if getattr(args, "json", False):
+            print(_json_out("swap", {"port": port, "success": True, "dry_run": True, "action": "would free and hold"}))
+        else:
+            print(colorize(f"[dry-run] Would free port {port} and acquire exclusive reservation socket.", Colors.CYAN))
         return EXIT_OK
 
+    # Step 2: Acquire exclusive holding socket
+    held_socks: list[socket.socket] = []
+    _SO_EXCL = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+
+    def _bind_held_socket(family: int, sock_type: int, addr: tuple) -> socket.socket:
+        s = socket.socket(family, sock_type)
+        s.set_inheritable(False)
+        if sys.platform == "win32" and _SO_EXCL is not None:
+            s.setsockopt(socket.SOL_SOCKET, _SO_EXCL, 1)
+        s.bind(addr)
+        if sock_type == socket.SOCK_STREAM:
+            s.listen(1)
+        return s
+
+    try:
+        held_socks.append(_bind_held_socket(socket.AF_INET, socket.SOCK_STREAM, ("0.0.0.0", port)))
+    except OSError as e:
+        if getattr(args, "json", False):
+            print(_json_out("swap", {"port": port, "success": False, "error": f"Failed to bind holding socket: {e}"}))
+        else:
+            print(colorize(f"Error: Failed to secure holding socket on port {port}: {e}", Colors.RED), file=sys.stderr)
+        return EXIT_GENERAL_ERROR
+
+    # Try binding IPv6 holding socket too
+    if socket.has_ipv6:
+        try:
+            s6 = _bind_held_socket(socket.AF_INET6, socket.SOCK_STREAM, ("::", port))
+            held_socks.append(s6)
+        except OSError:
+            pass
+
+    cmd_to_run = getattr(args, "exec_cmd", None) or getattr(args, "command_to_run", None)
+
+    if cmd_to_run:
+        # Step 3a: Atomic handover mode
+        if not getattr(args, "json", False):
+            print(colorize(f"✓ Port {port} secured exclusively.", Colors.GREEN))
+            print(colorize(f"→ Handing over port {port} to: {cmd_to_run}", Colors.CYAN + Colors.BOLD))
+
+        # Release holding sockets immediately prior to executing target command
+        for s in held_socks:
+            try:
+                s.close()
+            except Exception:  # noqa: BLE001, S110
+                pass
+        held_socks.clear()
+
+        # Run handover command
+        rc = subprocess.call(cmd_to_run, shell=True)
+        if getattr(args, "json", False):
+            print(_json_out("swap", {"port": port, "success": True, "command": cmd_to_run, "exit_code": rc}))
+        return rc
+    else:
+        # Step 3b: Interactive hold mode
+        if getattr(args, "json", False):
+            for s in held_socks:
+                s.close()
+            print(_json_out("swap", {"port": port, "success": True, "held": True, "message": "Port swapped and held"}))
+            return EXIT_OK
+
+        timeout = getattr(args, "timeout", None)
+        print(colorize(f"✓ Port {port} secured and exclusively held.", Colors.GREEN + Colors.BOLD))
+        if timeout:
+            print(colorize(f"  Holding port for {timeout} seconds... (Press Ctrl+C to release early)", Colors.YELLOW))
+            try:
+                time.sleep(timeout)
+            except KeyboardInterrupt:
+                pass
+        else:
+            print(colorize("  Press ENTER to release port for your application (or Ctrl+C to exit)...", Colors.CYAN))
+            try:
+                input()
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        for s in held_socks:
+            try:
+                s.close()
+            except Exception:  # noqa: BLE001, S110
+                pass
+        print(colorize(f"🔓 Port {port} released and ready.", Colors.GREEN))
+        return EXIT_OK
+
+
+def handle_audit(args: argparse.Namespace) -> int:
+    """Display or export audit log history."""
+    limit = getattr(args, "limit", 20)
+    fmt = getattr(args, "format", "table")
+    if getattr(args, "siem", False):
+        fmt = "siem"
+    elif getattr(args, "json", False) or fmt == "json":
+        fmt = "json"
+
+    export_path = getattr(args, "export", None)
+    if export_path or fmt in ("json", "ndjson", "siem"):
+        exported = audit.export_audit_events(format=fmt, limit=limit, filepath=export_path)
+        if export_path and not getattr(args, "json", False):
+            print(colorize(f"✓ Exported audit log to: {export_path} (format: {fmt})", Colors.GREEN))
+        elif fmt == "json" and getattr(args, "json", False):
+            entries = audit.read_recent_audit_events(limit=limit)
+            print(_json_out("audit", {"entries": entries}))
+        else:
+            print(exported)
+        return EXIT_OK
+
+    entries = audit.read_recent_audit_events(limit=limit)
     if not entries:
         print(colorize("No audit log entries found in ~/.kport/audit.log", Colors.YELLOW))
         return EXIT_OK
@@ -1175,6 +1355,9 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
 
     if args.command == "hold":
         return handle_hold(args, inspector)
+
+    if args.command == "swap":
+        return handle_swap(args, inspector)
 
     if args.command == "audit":
         return handle_audit(args)
@@ -1891,6 +2074,66 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                 overall_ok = False
                 exit_codes.append(EXIT_PERMISSION)
                 continue
+
+            # If --service-aware is requested, try stopping via process manager first
+            if getattr(args, "service_aware", False) and pids:
+                pm_infos = [detect_process_manager(pid) for pid in pids]
+                valid_pm = [pm for pm in pm_infos if pm]
+                if valid_pm:
+                    pm = valid_pm[0]
+                    mgr = pm["manager"]
+                    svc_name = pm["name"]
+                    if not args.json:
+                        print(
+                            colorize(
+                                f"Service-aware mode: Port {port} is managed by {mgr} ('{svc_name}'). Stopping service cleanly...",
+                                Colors.CYAN,
+                            )
+                        )
+                    res = stop_service(
+                        manager=mgr,
+                        service_name=svc_name,
+                        timeout=getattr(args, "graceful_timeout", 30.0) or 30.0,
+                        dry_run=getattr(args, "dry_run", False),
+                    )
+                    verified = False
+                    if res.success and not getattr(args, "dry_run", False):
+                        verified = _poll_until_free(port, 3.0, inspector, proto=getattr(args, "proto", "both"))
+                    audit.log_service_stop(
+                        port=port,
+                        manager=mgr,
+                        service_name=svc_name,
+                        command=res.command_executed,
+                        dry_run=getattr(args, "dry_run", False),
+                        success=res.success,
+                        verified_free=verified,
+                        message=res.message,
+                    )
+                    if res.success and (verified or getattr(args, "dry_run", False)):
+                        if args.json:
+                            results.append(
+                                {
+                                    "port": port,
+                                    "type": "service",
+                                    "manager": mgr,
+                                    "service": svc_name,
+                                    "action": "stop_service",
+                                    "success": True,
+                                    "message": res.message,
+                                }
+                            )
+                        else:
+                            print(colorize(f"✓ Port {port}: stopped service '{svc_name}' via {mgr}.", Colors.GREEN))
+                        exit_codes.append(EXIT_OK)
+                        continue
+                    else:
+                        if not args.json:
+                            print(
+                                colorize(
+                                    f"Service stop did not free port {port}: {res.message}. Proceeding with process kill...",
+                                    Colors.YELLOW,
+                                )
+                            )
 
             # Show what will be killed, grouped by protocol
             if not args.json:
@@ -2666,6 +2909,18 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                             f"   Found {len(alt_bindings)} {other_proto.upper()} {alt_s}. Try: kport -ip '{pname}' --proto={other_proto} or --proto=both"
                         )
                         print(colorize(msg, Colors.CYAN))
+                        try:
+                            active_conns = _filter_connections_data(inspector, process=pname, max_results=10)
+                        except Exception:  # noqa: BLE001
+                            active_conns = []
+                        if active_conns:
+                            print(
+                                colorize(
+                                    f"   ℹ  Notice: Process has {len(active_conns)}+ active client connection(s) (e.g. ESTABLISHED to remote servers).\n"
+                                    f"      To inspect active client connections, run: kport connections --process '{pname}'",
+                                    Colors.YELLOW,
+                                )
+                            )
                     elif not _is_elevated() and _has_access_denied_on_pids(pids):
                         if sys.platform == "win32":
                             _elev_msg = (
@@ -2691,6 +2946,18 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                                 Colors.CYAN,
                             )
                         )
+                        try:
+                            active_conns = _filter_connections_data(inspector, process=pname, max_results=10)
+                        except Exception:  # noqa: BLE001
+                            active_conns = []
+                        if active_conns:
+                            print(
+                                colorize(
+                                    f"   ℹ  Notice: Process has {len(active_conns)}+ active client connection(s) (e.g. ESTABLISHED to remote servers).\n"
+                                    f"      To inspect active client connections, run: kport connections --process '{pname}'",
+                                    Colors.YELLOW,
+                                )
+                            )
                 else:
                     print(
                         colorize(
@@ -3416,9 +3683,9 @@ _kport_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="inspect explain diagnose doctor connections kill kill-process list docker conflicts watch mcp completion --json --dry-run --yes --debug --config --bypass-safety --version --wait-for-exit --proto"
+    opts="inspect explain diagnose doctor connections kill kill-process list docker conflicts watch hold swap audit stop-service mcp completion --json --dry-run --yes --debug --config --bypass-safety --version --wait-for-exit --proto --service-aware"
     case "${prev}" in
-        inspect|explain|diagnose|connections|watch|kill)
+        inspect|explain|diagnose|connections|watch|kill|hold|swap|stop-service)
             return 0
             ;;
         kill-process|--inspect-process|-ip|-kp)
@@ -3447,6 +3714,7 @@ _kport() {
         '--bypass-safety[Bypass safety shields on protected ports/processes]' \\
         '--wait-for-exit[Wait for port to be free after killing (seconds)]' \\
         '--proto[Protocol type tcp|udp|both]' \\
+        '--service-aware[Cleanly stop supervising process manager]' \\
         '(-v --version)'{-v,--version}'[Show version]' \\
         '1: :->cmds' \\
         '*:: :->args'
@@ -3465,6 +3733,10 @@ _kport() {
                 'docker[List Docker-published ports]' \\
                 'conflicts[Detect docker/local port conflicts]' \\
                 'watch[Live monitoring of port ownership]' \\
+                'hold[Temporarily bind and reserve a port]' \\
+                'swap[Atomically free a port and hold/hand over]' \\
+                'audit[Inspect audit log history]' \\
+                'stop-service[Cleanly stop service manager controlling a port]' \\
                 'mcp[Start the stdio Model Context Protocol (MCP) server]' \\
                 'completion[Generate shell autocompletion]'
             ;;
@@ -3474,13 +3746,14 @@ _kport() {
     elif shell == "fish":
         print("""# fish completion for kport
 complete -c kport -f
-complete -c kport -a "inspect explain diagnose doctor connections kill kill-process list docker conflicts watch mcp completion"
+complete -c kport -a "inspect explain diagnose doctor connections kill kill-process list docker conflicts watch hold swap audit stop-service mcp completion"
 complete -c kport -s y -l yes -d "Skip confirmation prompts"
 complete -c kport -l json -d "Output machine-readable JSON"
 complete -c kport -l dry-run -d "Show actions without executing"
 complete -c kport -l debug -d "Verbose internal logs"
 complete -c kport -l config -d "Path to JSON config file"
 complete -c kport -l bypass-safety -d "Bypass safety shields on protected ports/processes"
+complete -c kport -l service-aware -d "Cleanly stop supervising process manager"
 complete -c kport -l wait-for-exit -d "Wait for port to be free after killing (seconds)"
 complete -c kport -l proto -r -f -a "tcp udp both" -d "Protocol type tcp|udp|both"
 complete -c kport -s v -l version -d "Show version"
@@ -3489,7 +3762,7 @@ complete -c kport -s v -l version -d "Show version"
         print("""# powershell completion for kport
 Register-ArgumentCompleter -Native -CommandName kport -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $opts = @('inspect', 'explain', 'diagnose', 'doctor', 'connections', 'kill', 'kill-process', 'list', 'docker', 'conflicts', 'watch', 'mcp', 'completion', '--json', '--dry-run', '--yes', '--debug', '--config', '--bypass-safety', '--version', '--wait-for-exit', '--proto')
+    $opts = @('inspect', 'explain', 'diagnose', 'doctor', 'connections', 'kill', 'kill-process', 'list', 'docker', 'conflicts', 'watch', 'hold', 'swap', 'audit', 'stop-service', 'mcp', 'completion', '--json', '--dry-run', '--yes', '--debug', '--config', '--bypass-safety', '--service-aware', '--version', '--wait-for-exit', '--proto')
     $opts | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }

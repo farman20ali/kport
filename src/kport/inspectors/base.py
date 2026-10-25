@@ -456,6 +456,8 @@ class BaseInspector:
                 "Permission denied — could not escalate. Try running with sudo/admin.",
             )
         except Exception as e:  # noqa: BLE001 - catch arbitrary exceptions during signal dispatch
+            if not self.is_process_alive(pid) or "WinError 87" in str(e):
+                return True, "Process disappeared"
             return False, f"SIGTERM error: {e}"
 
         # Stage 2: Wait & Poll

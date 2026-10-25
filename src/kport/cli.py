@@ -240,6 +240,11 @@ Examples:
         help="Container engine to query: docker, podman, or all (default: all)",
     )
     parser.add_argument(
+        "--service-aware",
+        action="store_true",
+        help="Cleanly stop supervising process manager to avoid restart loops",
+    )
+    parser.add_argument(
         "-I",
         "--interactive",
         action="store_true",
@@ -314,6 +319,11 @@ Examples:
         choices=["docker", "podman", "all"],
         default="all",
         help="Container engine to query: docker, podman, or all (default: all)",
+    )
+    parent_parser.add_argument(
+        "--service-aware",
+        action="store_true",
+        help="Cleanly stop supervising process manager (systemd, pm2, supervisor, Windows Service) to avoid infinite restart loops",
     )
 
     sp_inspect = sub.add_parser(
@@ -513,6 +523,33 @@ Examples:
         help="Automatically release port after N seconds",
     )
 
+    sp_swap = sub.add_parser(
+        "swap",
+        parents=[parent_parser],
+        help="Atomically free a port and hold/hand over to prevent race conditions",
+    )
+    sp_swap.add_argument("port", type=int, help="Target port to swap and hold")
+    sp_swap.add_argument(
+        "--command",
+        "-c",
+        dest="exec_cmd",
+        type=str,
+        default=None,
+        help="Command to launch after port is secured (atomic handover)",
+    )
+    sp_swap.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Maximum seconds to hold port before releasing (default: wait for Enter/Ctrl+C)",
+    )
+    sp_swap.add_argument(
+        "--force",
+        action="store_true",
+        help="Force kill stubborn processes",
+    )
+
     sp_audit = sub.add_parser(
         "audit",
         parents=[parent_parser],
@@ -523,6 +560,24 @@ Examples:
         type=int,
         default=20,
         help="Number of recent entries to show (default: 20)",
+    )
+    sp_audit.add_argument(
+        "--format",
+        choices=["table", "json", "ndjson", "siem"],
+        default="table",
+        help="Output format: table, json, ndjson, or siem (default: table)",
+    )
+    sp_audit.add_argument(
+        "--export",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Export audit logs to specified file path",
+    )
+    sp_audit.add_argument(
+        "--siem",
+        action="store_true",
+        help="Export logs in SIEM Common Event Format (alias for --format=siem)",
     )
 
     parser._raw_argv = argv

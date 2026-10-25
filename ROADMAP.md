@@ -77,8 +77,8 @@ With network scanning cleanly designated to `netcheck`, `kport` focuses entirely
 flowchart TD
     Current["kport v5.2.0\nLocal Ports + Docker + MCP Server"] --> Phase1["Phase 1 (v5.3.0): Local Binding & Socket Intelligence [COMPLETED]\n(Dual-stack IPv4/IPv6, 0.0.0.0 vs 127.0.0.1 diagnostics, netcheck cross-hints)"]
     Phase1 --> Phase2["Phase 2 (v5.4.0): Container & Cloud Runtime Visibility [COMPLETED]\n(Podman, Docker/Podman Compose project filtering, K8s port-forward / proxy detection)"]
-    Phase2 --> Phase3["Phase 3 (v5.5.0): Advanced Remediation & Orchestration [IN PROGRESS]\n(Process-manager restart suppression, atomic port swapping, audit exports)"]
-    Phase3 --> Phase4["Phase 4 (v6.0.0): Real-Time Port Ops & High-Performance Core\n(Daemon-less event streaming, eBPF/Procfs acceleration, zero-overhead MCP)"]
+    Phase2 --> Phase3["Phase 3 (v5.5.0): Advanced Remediation & Orchestration [COMPLETED]\n(Process-manager restart suppression, atomic port swapping, audit exports)"]
+    Phase3 --> Phase4["Phase 4 (v6.0.0): Real-Time Port Ops & High-Performance Core [IN PROGRESS]\n(Daemon-less event streaming, eBPF/Procfs acceleration, zero-overhead MCP)"]
 ```
 
 ---
@@ -137,17 +137,16 @@ $ kport diagnose 8080
 
 ---
 
-### Phase 3 — Advanced Remediation & Process Manager Coordination (v5.5.0)
+### Phase 3 — Advanced Remediation & Process Manager Coordination (v5.5.0) ✅ [COMPLETED]
 **Theme:** *Fix port conflicts cleanly without breaking developer workflows.*
 
 #### Objectives
-1. **Process Manager Restart Suppression:**
-   - When a port is owned by `systemd`, `pm2`, or `supervisord`, raw `kill -9` causes the manager to immediately spawn a new process on the same port (infinite restart loop).
-   - `kport kill --service-aware` automatically signals the supervisor (`pm2 stop <app>`, `systemctl stop <unit>`) instead of fighting the restart loop.
-2. **Atomic Port Reservation & Handover (`kport swap`):**
-   - Atomically hold a port with `kport hold` immediately after killing a process, preventing race conditions where another background job claims the port before your intended app starts.
-3. **Audit Compliance & CI/CD Telemetry:**
-   - Export audit logs (`kport audit --format=json`) to standard SIEM / CI telemetry tools.
+1. [x] **Process Manager Restart Suppression:**
+   - Implemented `kport kill --service-aware` to detect managing supervisors (`systemd`, `pm2`, `supervisor`, `windows-service`) and issue graceful stop commands (`systemctl stop`, `pm2 stop`, `Stop-Service`) instead of triggering infinite supervisor restart loops.
+2. [x] **Atomic Port Reservation & Handover (`kport swap`):**
+   - Implemented `kport swap <port> [--command <cmd>] [--timeout <sec>]`: cleanly frees the port, atomically binds an exclusive holding socket (`SO_EXCLUSIVEADDRUSE`), and performs zero-race handover directly to the user application or holds until keypress.
+3. [x] **Audit Compliance & CI/CD Telemetry:**
+   - Extended `kport audit` with `--format=[table|json|ndjson|siem]` and `--export <file>` for enterprise CI/CD and SIEM telemetry (Common Event Format / CEF).
 
 ---
 

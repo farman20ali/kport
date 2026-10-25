@@ -327,6 +327,9 @@ class PsutilInspector(BaseInspector):
         except PermissionError:
             raise PermissionError()
         except OSError as e:
+            # On Windows, ERROR_INVALID_PARAMETER (winerror 87 / errno 22) indicates the PID no longer exists
+            if getattr(e, "winerror", None) == 87 or getattr(e, "errno", None) in (22, 3):
+                raise ProcessLookupError() from e
             raise RuntimeError(str(e))
 
     def is_process_alive(self, pid: int) -> bool:

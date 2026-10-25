@@ -180,3 +180,46 @@ def read_recent_audit_events(limit: int = 20) -> list[dict[str, Any]]:
         return []
     return entries[-limit:][::-1]
 
+
+def format_siem_cef(entry: dict[str, Any]) -> str:
+    """Format an audit record as a standard Common Event Format (CEF) line."""
+    ts = entry.get("ts", "")
+    version = entry.get("version", __version__)
+    action = entry.get("action", "operation")
+    msg = entry.get("message", "Port operation")
+    user = entry.get("user", "unknown")
+    success = "success" if entry.get("success") else "failure"
+    target = json.dumps(entry.get("target", {}), separators=(",", ":"))
+    severity = "3" if entry.get("success") else "6"
+
+    # CEF:Version|Device Vendor|Device Product|Device Version|Device Event Class ID|Name|Severity|[Extension]
+    return (
+        f"CEF:0|kport|kport|{version}|{action}|{msg}|{severity}|"
+        f"rt={ts} suser={user} cs1Label=Target cs1={target} outcome={success} "
+        f"dryRun={entry.get('dry_run', False)}"
+    )
+
+
+def export_audit_events(
+    format: str = "json",
+    limit: int | None = 100,
+    filepath: Path | str | None = None,
+) -> str:
+    """Export recent audit logs formatted as json, ndjson, or siem (CEF)."""
+    entries = read_recent_audit_events(limit=limit or 100)
+
+    fmt = (format or "json").lower()
+    if fmt == "ndjson":
+        output = "\n".join(json.dumps(e, separators=(",", ":")) for e in entries)
+    elif fmt == "siem":
+        output = "\n".join(format_siem_cef(e) for e in entries)
+    else:  # json
+        output = json.dumps(entries, indent=2)
+
+    if filepath:
+        out_path = Path(filepath)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(output + "\n", encoding="utf-8")
+
+    return output
+
