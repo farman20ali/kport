@@ -103,7 +103,7 @@ def _has_access_denied_on_pids(pids: list[int]) -> bool:
                 return True
             except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 continue
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     return False
 

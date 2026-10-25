@@ -1040,7 +1040,7 @@ def handle_hold(args: argparse.Namespace, inspector: BaseInspector) -> int:
         for s in held_socks:
             try:
                 s.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
         print(colorize(f"\n🔓 Port {port} ({proto_label}) released.", Colors.GREEN))
 
@@ -1777,10 +1777,10 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
                 udp_pids = sorted({b.pid for b in udp_bindings if b.pid})
                 print()
                 print(colorize(f"Port {port} has dual-protocol listeners. Select what to kill:", Colors.BOLD))
-                print(f"  [1] Both (TCP & UDP)")
+                print("  [1] Both (TCP & UDP)")
                 print(f"  [2] TCP only (PID {', '.join(map(str, tcp_pids))})")
                 print(f"  [3] UDP only (PID {', '.join(map(str, udp_pids))})")
-                print(f"  [q] Cancel")
+                print("  [q] Cancel")
                 print()
                 print(colorize(f"Tip: You can target directly next time with:\n  kport kill {port} --proto=tcp\n  kport kill {port} --proto=udp", Colors.CYAN))
                 print()
@@ -2610,7 +2610,7 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                     proto_0 = (ports[0].proto or "tcp").upper()
                     proto_color_0 = Colors.BLUE if proto_0 == "TCP" else Colors.MAGENTA
                     proto_badge_0 = colorize(f"{proto_0:<8}", proto_color_0)
-                    pid_s = colorize(f"{str(pid):<8}", Colors.CYAN)
+                    pid_s = colorize(f"{pid!s:<8}", Colors.CYAN)
                     addr_0 = ports[0].laddr or "-"
                     print(
                         f"{pid_s} {proc_name:<18} {ports[0].port:<8} {proto_badge_0} {ports[0].state or '-':<10} {addr_0}"
@@ -3003,10 +3003,10 @@ def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) ->
                     udp_pids = sorted({b.pid for b in udp_bindings if b.pid})
                     print()
                     print(colorize(f"Port {args.kill} has dual-protocol listeners. Select what to kill:", Colors.BOLD))
-                    print(f"  [1] Both (TCP & UDP)")
+                    print("  [1] Both (TCP & UDP)")
                     print(f"  [2] TCP only (PID {', '.join(map(str, tcp_pids))})")
                     print(f"  [3] UDP only (PID {', '.join(map(str, udp_pids))})")
-                    print(f"  [q] Cancel")
+                    print("  [q] Cancel")
                     print()
                     print(colorize(f"Tip: You can target directly next time with:\n  kport -k {args.kill} --proto=tcp\n  kport -k {args.kill} --proto=udp", Colors.CYAN))
                     print()

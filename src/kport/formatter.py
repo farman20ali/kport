@@ -269,7 +269,7 @@ def print_port_bindings_detail(
                             print(f"      cmd:  {cmd}")
                         if info.user:
                             print(f"      user: {info.user}")
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001, S110
                     pass
 
 
