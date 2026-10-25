@@ -13,11 +13,20 @@ import psutil  # Safe to import because this implementation is dynamically loade
 if not hasattr(psutil, "Error"):
     psutil.Error = Exception  # type: ignore[attr-defined]
 
-from .base import BaseInspector, ConnectionInfo, PortBinding, ProcessInfo
+from kport.constants import RUNTIME_ENRICHMENT_NAMES
+
+from .base import (
+    BaseInspector,
+    ConnectionInfo,
+    PortBinding,
+    ProcessInfo,
+    enrich_process_name,
+    matches_process_name,
+)
 
 
 class PsutilInspector(BaseInspector):
-    def list_listening(self, proto: str = "tcp") -> list[PortBinding]:
+    def list_listening(self, proto: str = "both") -> list[PortBinding]:
         bindings: dict[tuple, PortBinding] = {}
         kinds = (
             ["tcp"]
@@ -41,7 +50,7 @@ class PsutilInspector(BaseInspector):
                 )
                 port = conn.laddr.port if hasattr(conn.laddr, "port") else conn.laddr[1]
                 family = "IPv6" if conn.family.name == "AF_INET6" else "IPv4"
-                state = conn.status
+                state = "UDP" if kind == "udp" and (not conn.status or conn.status == psutil.CONN_NONE) else conn.status
                 pid = conn.pid
                 proc_name = None
                 if pid:
@@ -63,7 +72,7 @@ class PsutilInspector(BaseInspector):
                     )
         return sorted(bindings.values(), key=lambda b: b.port)
 
-    def find_pids_on_port(self, port: int, proto: str = "tcp") -> list[int]:
+    def find_pids_on_port(self, port: int, proto: str = "both") -> list[int]:
         pids = set()
         kinds = (
             ["tcp"]
@@ -92,7 +101,7 @@ class PsutilInspector(BaseInspector):
                     pids.add(conn.pid)
         return sorted(pids)
 
-    def find_bindings_on_port(self, port: int, proto: str = "tcp") -> list[PortBinding]:
+    def find_bindings_on_port(self, port: int, proto: str = "both") -> list[PortBinding]:
         bindings: list[PortBinding] = []
         kinds = (
             ["tcp"]
@@ -139,7 +148,7 @@ class PsutilInspector(BaseInspector):
                         laddr=laddr,
                         pid=pid,
                         process_name=proc_name,
-                        state=conn.status,
+                        state="UDP" if kind == "udp" and (not conn.status or conn.status == psutil.CONN_NONE) else conn.status,
                         proto="tcp" if kind == "tcp" else "udp",
                     )
                 )
@@ -241,7 +250,6 @@ class PsutilInspector(BaseInspector):
 
     def find_pids_by_name(self, name: str, exact: bool = False) -> list[int]:
         out = []
-        name_lower = name.lower()
         self_pid = os.getpid()
         for p in psutil.process_iter(["pid", "name"]):
             try:
@@ -249,24 +257,26 @@ class PsutilInspector(BaseInspector):
                 if pid == self_pid:
                     continue
                 pname = p.info["name"] or ""
-                compare = pname.lower()
-                match = (
-                    (compare == name_lower)
-                    if exact
-                    else (name_lower in compare)
-                )
-                if match:
+                # Fast check on process name first
+                if matches_process_name(pname, None, name, exact=exact):
                     out.append(pid)
+                    continue
+                # For runtimes (python, node, etc.), inspect cmdline to match script/module name
+                base_clean = pname.lower()
+                if base_clean.endswith(".exe"):
+                    base_clean = base_clean[:-4]
+                if base_clean in RUNTIME_ENRICHMENT_NAMES:
+                    cmd = p.cmdline() or []
+                    if matches_process_name(pname, cmd, name, exact=exact):
+                        out.append(pid)
             except psutil.Error:
                 continue
         return sorted(set(out))
 
-
     def find_ports_by_process_name(
-        self, name: str, exact: bool = False, proto: str = "tcp"
+        self, name: str, exact: bool = False, proto: str = "both"
     ) -> list[PortBinding]:
         results: list[PortBinding] = []
-        name_lower = name.lower()
         kinds = (
             ["tcp"]
             if proto == "tcp"
@@ -287,33 +297,30 @@ class PsutilInspector(BaseInspector):
                     continue
                 try:
                     p = psutil.Process(pid)
-                    pname = (p.name() or "").lower()
-                    cmdline = " ".join(p.cmdline() or []).lower()
-                    matched = (
-                        (pname == name_lower)
-                        if exact
-                        else (name_lower in pname or name_lower in cmdline)
+                    pname = p.name() or ""
+                    cmdline = p.cmdline() or []
+                    if not matches_process_name(pname, cmdline, name, exact=exact):
+                        continue
+                    enriched_name = enrich_process_name(pname, cmdline)
+                    laddr = (
+                        f"{conn.laddr.ip}:{conn.laddr.port}"
+                        if hasattr(conn.laddr, "ip")
+                        else f"{conn.laddr[0]}:{conn.laddr[1]}"
                     )
-                    if matched:
-                        laddr = (
-                            f"{conn.laddr.ip}:{conn.laddr.port}"
-                            if hasattr(conn.laddr, "ip")
-                            else f"{conn.laddr[0]}:{conn.laddr[1]}"
+                    family = "IPv6" if conn.family.name == "AF_INET6" else "IPv4"
+                    results.append(
+                        PortBinding(
+                            port=conn.laddr.port
+                            if hasattr(conn.laddr, "port")
+                            else conn.laddr[1],
+                            family=family,
+                            laddr=laddr,
+                            pid=pid,
+                            process_name=enriched_name,
+                            state=conn.status,
+                            proto="tcp" if kind == "tcp" else "udp",
                         )
-                        family = "IPv6" if conn.family.name == "AF_INET6" else "IPv4"
-                        results.append(
-                            PortBinding(
-                                port=conn.laddr.port
-                                if hasattr(conn.laddr, "port")
-                                else conn.laddr[1],
-                                family=family,
-                                laddr=laddr,
-                                pid=pid,
-                                process_name=p.name(),
-                                state=conn.status,
-                                proto="tcp" if kind == "tcp" else "udp",
-                            )
-                        )
+                    )
                 except psutil.Error:
                     continue
         return sorted(results, key=lambda b: (b.pid or 0, b.port))
@@ -327,6 +334,9 @@ class PsutilInspector(BaseInspector):
         except PermissionError:
             raise PermissionError()
         except OSError as e:
+            # On Windows, ERROR_INVALID_PARAMETER (winerror 87 / errno 22) indicates the PID no longer exists
+            if getattr(e, "winerror", None) == 87 or getattr(e, "errno", None) in (22, 3):
+                raise ProcessLookupError() from e
             raise RuntimeError(str(e))
 
     def is_process_alive(self, pid: int) -> bool:

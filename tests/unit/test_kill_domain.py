@@ -224,3 +224,31 @@ class TestNoPresentationImportInBase:
             content = fh.read()
         assert "from kport.formatter" not in content
         assert "from .formatter" not in content
+
+    def test_kill_pid_already_dead_process(self):
+        inspector = KillTestInspector()
+        inspector.is_alive[999] = False  # Process already dead / disappears immediately
+        ok, msg = inspector.kill_pid(999)
+        assert ok is True
+        # Process gone before or immediately after SIGTERM — either message is correct
+        assert any(
+            phrase in msg.lower()
+            for phrase in ("already terminated", "terminated gracefully", "disappeared", "not found")
+        )
+        # At most SIGTERM was sent — never escalated to SIGKILL since process was already gone
+        sigkill_val = getattr(__import__("signal"), "SIGKILL", 9)
+        assert not any(sig == sigkill_val for _, sig in inspector.signals_sent)
+
+    def test_kill_pid_winerror_87_handled_as_disappeared(self):
+        inspector = KillTestInspector()
+        inspector.is_alive[999] = True  # Initially reported alive
+
+        def fake_send_signal(pid, sig):
+            inspector.is_alive[pid] = False  # disappeared during kill
+            raise OSError(22, "[WinError 87] The parameter is incorrect")
+
+        inspector.send_signal = fake_send_signal
+        ok, msg = inspector.kill_pid(999)
+        assert ok is True
+        assert "disappeared" in msg.lower()
+

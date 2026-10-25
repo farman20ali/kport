@@ -81,10 +81,11 @@ def print_table_listen(bindings: list[Any]) -> None:
         print(colorize("No listening ports found.", Colors.YELLOW))
         return
 
-    headers = ["Port", "PID", "Process", "State", "Address"]
+    headers = ["Port", "Proto", "PID", "Process", "State", "Address"]
     rows = [
         [
             str(b.port),
+            (b.proto or "tcp").upper(),
             str(b.pid) if b.pid is not None else "-",
             b.process_name or "-",
             b.state or "-",
@@ -101,6 +102,10 @@ def print_table_listen(bindings: list[Any]) -> None:
         cells = [_trunc(row[j], widths[j]).ljust(widths[j]) for j in range(len(widths))]
         # Apply padding BEFORE colorize so ANSI bytes don't skew column width
         cells[0] = colorize(_trunc(row[0], widths[0]).ljust(widths[0]).strip(), Colors.CYAN)
+        # Colour the proto badge: TCP=blue, UDP=magenta
+        proto_val = row[1]
+        proto_color = Colors.BLUE if proto_val == "TCP" else Colors.MAGENTA
+        cells[1] = colorize(_trunc(row[1], widths[1]).ljust(widths[1]).strip(), proto_color)
         print("  ".join(cells))
 
 
@@ -163,11 +168,11 @@ def print_table_docker(mappings: list[Any]) -> None:
 
 
 def print_table_list_product(local_bindings: list[Any], docker_maps: list[Any]) -> None:
-    """Print unified list output representing PORT, TYPE, and OWNER."""
+    """Print unified list output representing PORT, PROTO, TYPE, and OWNER."""
     rows: dict[int, dict[str, Any]] = {}
     for b in local_bindings:
         rows.setdefault(b.port, {})
-        rows[b.port]["local"] = b
+        rows[b.port].setdefault("locals", []).append(b)
     for d in docker_maps:
         rows.setdefault(d.host_port, {})
         rows[d.host_port]["docker"] = d
@@ -178,28 +183,99 @@ def print_table_list_product(local_bindings: list[Any], docker_maps: list[Any]) 
 
     # Build data rows for dynamic width computation
     data_rows = []
+    proto_vals: list[str] = []
     for port in sorted(rows.keys()):
-        if "docker" in rows[port] and "local" in rows[port]:
-            owner = rows[port]["docker"].container_name
-            data_rows.append([str(port), "conflict", owner])
-        elif "docker" in rows[port]:
-            owner = rows[port]["docker"].container_name
-            data_rows.append([str(port), "docker", owner])
+        if "docker" in rows[port] and "locals" not in rows[port]:
+            d = rows[port]["docker"]
+            owner = d.container_name
+            engine_type = getattr(d, "engine", "docker")
+            proto = (getattr(d, "proto", "tcp") or "tcp").upper()
+            data_rows.append([str(port), proto, engine_type, owner])
+            proto_vals.append(proto)
+        elif "docker" in rows[port] and "locals" in rows[port]:
+            d = rows[port]["docker"]
+            owner = d.container_name
+            proto = (getattr(d, "proto", "tcp") or "tcp").upper()
+            data_rows.append([str(port), proto, "conflict", owner])
+            proto_vals.append(proto)
         else:
-            b = rows[port]["local"]
-            owner = b.process_name or "-"
-            data_rows.append([str(port), "local", owner])
+            for b in rows[port]["locals"]:
+                proto = (b.proto or "tcp").upper()
+                owner = b.process_name or "-"
+                data_rows.append([str(port), proto, "local", owner])
+                proto_vals.append(proto)
 
-    headers = ["PORT", "TYPE", "OWNER"]
+    headers = ["PORT", "PROTO", "TYPE", "OWNER"]
     widths = _col_widths(data_rows, headers)
     header_line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
     print(colorize(header_line, Colors.BOLD))
     print("─" * (sum(widths) + 2 * len(widths)))
-    for row in data_rows:
+    for row, pv in zip(data_rows, proto_vals):
         cells = [_trunc(row[j], widths[j]).ljust(widths[j]) for j in range(len(widths))]
-        # Apply padding BEFORE colorize so ANSI bytes don't skew column width
         cells[0] = colorize(_trunc(row[0], widths[0]).ljust(widths[0]).strip(), Colors.CYAN)
+        proto_color = Colors.BLUE if pv == "TCP" else Colors.MAGENTA
+        cells[1] = colorize(_trunc(row[1], widths[1]).ljust(widths[1]).strip(), proto_color)
         print("  ".join(cells))
+
+
+def print_port_bindings_detail(
+    port: int,
+    bindings: list[Any],
+    inspector: Any,
+    header: str | None = None,
+) -> None:
+    """Print a rich per-binding breakdown for a port.
+
+    Shows each binding grouped by protocol, with PID, process name, command,
+    and user.  Used by inspect and kill flows to clearly distinguish TCP from
+    UDP listeners on the same port number.
+
+    Parameters
+    ----------
+    port:
+        The port number being described.
+    bindings:
+        List of PortBinding objects for this port (may mix TCP and UDP).
+    inspector:
+        Active inspector used to enrich process info.
+    header:
+        Optional bold header line.  Defaults to ``"Port <port> bindings:"``.
+    """
+    if header is None:
+        header = f"Port {port} bindings:"
+    print(colorize(header, Colors.CYAN + Colors.BOLD))
+    if not bindings:
+        print(colorize("  (none)", Colors.YELLOW))
+        return
+    # Group by proto so TCP and UDP sections are visually separated
+    for proto_key in ("tcp", "udp"):
+        proto_bindings = [b for b in bindings if (b.proto or "tcp").lower() == proto_key]
+        if not proto_bindings:
+            continue
+        badge_color = Colors.BLUE if proto_key == "tcp" else Colors.MAGENTA
+        badge = colorize(proto_key.upper(), badge_color + Colors.BOLD)
+        print(f"  [{badge}]")
+        by_pid: dict[int | None, list[Any]] = {}
+        for b in proto_bindings:
+            by_pid.setdefault(b.pid, []).append(b)
+
+        for pid, pbindings in by_pid.items():
+            pname = pbindings[0].process_name or "?"
+            raw_addrs = [b.laddr or f"*:{port}" for b in pbindings]
+            addrs = ", ".join(dict.fromkeys(raw_addrs))
+            pid_str = colorize(str(pid), Colors.YELLOW) if pid else colorize("(no PID)", Colors.RED)
+            print(f"    PID {pid_str}  {colorize(pname, Colors.WHITE)}  @ {addrs}")
+            if pid:
+                try:
+                    info = inspector.get_process_info(pid)
+                    if info:
+                        if info.cmdline:
+                            cmd = " ".join(info.cmdline)
+                            print(f"      cmd:  {cmd}")
+                        if info.user:
+                            print(f"      user: {info.user}")
+                except Exception:  # noqa: BLE001, S110
+                    pass
 
 
 def jsonify_docker(mappings: list[Any]) -> str:

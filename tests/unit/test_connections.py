@@ -239,3 +239,39 @@ def test_disappearing_process_does_not_crash():
     assert len(conns) == 1
     assert conns[0].pid == ghost_pid
     assert conns[0].process_name is None  # resolved to None gracefully
+
+
+def test_connections_proto_column_and_filter(capsys):
+    """Verify connections CLI prints PROTO column and supports --proto filtering."""
+    mock_conns = [
+        ConnectionInfo(100, "node", "tcp", "127.0.0.1", 3000, "127.0.0.1", 40000, "ESTABLISHED"),
+        ConnectionInfo(200, "dns_srv", "udp", "0.0.0.0", 53, "*", None, "UDP"),
+    ]
+    inspector = MagicMock()
+    inspector.list_connections.return_value = mock_conns
+
+    # 1. Default (both) text output
+    args = MagicMock(pid=None, process=None, port=None, state=None, proto="both", json=False)
+    handle_connections(args, inspector)
+    out, _ = capsys.readouterr()
+    assert "PROTO" in out
+    assert "TCP" in out
+    assert "UDP" in out
+    assert "2 connection(s) found." in out
+
+    # 2. Filter --proto tcp
+    args_tcp = MagicMock(pid=None, process=None, port=None, state=None, proto="tcp", json=False)
+    handle_connections(args_tcp, inspector)
+    out_tcp, _ = capsys.readouterr()
+    assert "node" in out_tcp
+    assert "dns_srv" not in out_tcp
+    assert "1 connection(s) found." in out_tcp
+
+    # 3. Filter --proto udp
+    args_udp = MagicMock(pid=None, process=None, port=None, state=None, proto="udp", json=False)
+    handle_connections(args_udp, inspector)
+    out_udp, _ = capsys.readouterr()
+    assert "dns_srv" in out_udp
+    assert "node" not in out_udp
+    assert "1 connection(s) found." in out_udp
+

@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [5.3.0] - 2026-10-25
+
+### Added
+
+#### Roadmap Phases 1 – 4 (completed in this cycle)
+
+- **Phase 1 — Local Binding Intelligence** (`v5.3.0`):
+  - Dual-stack IPv4/IPv6 binding scope detection (`127.0.0.1` loopback vs `0.0.0.0` vs `::` dual-stack).
+  - "Loopback Leak" risk flagging in `kport diagnose` with `netcheck` cross-tool hints.
+  - Stale socket state detection (`TIME_WAIT`, `CLOSE_WAIT`, `FIN_WAIT_2`) with `SO_REUSEADDR` guidance.
+
+- **Phase 2 — Container & Cloud Runtime Visibility** (`v5.4.0`):
+  - Unified `container_engine.py` supporting Docker and rootless Podman; `docker_engine.py` retained as a fully backward-compatible alias.
+  - Docker/Podman Compose project & service label parsing (`com.docker.compose.*`, `io.podman.compose.*`); new `--compose-project` / `--compose-service` filters on `kport list` and `kport docker`.
+  - Kubernetes port-forward & proxy detection (`kubectl port-forward`, `oc`, `minikube`, `kind`, `telepresence`) via new `k8s_detector.py`; enriched process names show target resource/namespace (e.g. `kubectl (port-forward → svc/billing-api:80, ns: prod)`).
+
+- **Phase 3 — Advanced Remediation & Process Manager Coordination** (`v5.5.0`):
+  - Service-aware kill (`kport kill --service-aware`): detects managing supervisors (`systemd`, `pm2`, `supervisor`, Windows Service) and issues graceful stop commands instead of triggering restart loops.
+  - Atomic port reservation & handover (`kport swap <port> [--command <cmd>] [--timeout <sec>]`): frees the port, binds an exclusive holding socket, and performs zero-race hand-over directly to the new process.
+  - Audit export formats (`kport audit --format=[table|json|ndjson|siem] --export <file>`) for enterprise CI/CD and SIEM telemetry (Common Event Format / CEF).
+
+- **Phase 4 — High-Performance Core & Real-Time Port Ops** (`v6.0.0`):
+  - **Event-Driven Port Watcher** (`kport/watcher.py`): `PortWatcher` class with background thread, `on_event` callback, `poll()` / `drain_events()` API. `kport watch` (no port) → global all-ports event-driven mode. `kport watcher-info` command shows platform strategy.
+  - **High-Performance Inspection Acceleration**: Linux `/proc/net/tcp` & `/proc/net/udp` direct parser (`fast_list_listening_linux()`) for sub-millisecond scans; Windows `GetExtendedTcpTable` Win32 API via ctypes (`fast_list_listening_windows()`), zero subprocess overhead.
+  - **MCP v2 Safety Rulebuilder** (`kport/mcp_rules.py`): `McpRule` / `RuleSet` dataclasses with first-match rule engine, per-agent identity controls, action allow/deny lists, port-range and PID scopes. Three built-in presets: `dev` (permissive), `ci` (ephemeral ports only), `enterprise` (deny-by-default). JSON persistence at `~/.kport/mcp_rules.json` (env-overridable via `KPORT_MCP_RULES`).
+
+#### Process Inspection Improvements
+
+- **`kport --pid <pid>`**: Rich metadata card now shows `Command`, `User`, `Parent PID` (with live parent name or `(terminated)` for orphaned processes), and `CWD` beneath the port binding table.
+- **`kport -ip <name>` / `inspect_process`**: Accurate process name matching engine (`matches_process_name()` in `inspectors/base.py`) that inspects only binary executable names and runtime targets — never command-line workspace arguments. Eliminates false positives from IDEs and language servers that pass project directories as CLI flags.
+- **Process Launcher / Parent Relationships**: `kport -ip` detects and labels related instances that are launchers or parents of listening child processes (e.g. `kport.exe — Launcher / Parent of PID 17764`).
+- **`(terminated)` Parent PID Label**: Orphaned/detached processes (e.g. `explorer.exe` whose `userinit.exe` parent already exited) now consistently display `Parent PID: 5104 (terminated)` across both `--pid` and `-ip` inspection paths.
+- **Windows Launcher Architecture Recognition**: `enrich_process_name()` in `inspectors/base.py` now recognises Windows pip-generated `.exe` console stubs (e.g. `Scripts\kport.exe`) and extensionless Unix scripts, labelling them correctly as `python (kport)` rather than as the Python interpreter.
+
+#### MCP Server Expansion
+
+- **21 registered MCP tools** (up from 15 in v5.2.0):
+  - New read-only: `inspect_process`, `get_safety_rules`, `watch_ports_snapshot`, `watcher_info`
+  - New destructive: `swap`
+  - New write: `set_safety_rules`
+- **`inspect_process`** tool: inspect all processes matching a name, list active port bindings, display rich process metadata, and detect related launchers — mirrors `kport -ip` CLI.
+- **`swap`** tool: atomically free and reserve a port via MCP; respects all safety shields and requires `agent_id` in the tool schema for audit tracing.
+- **`get_safety_rules` / `set_safety_rules`** tools: read and write the MCP v2 rule set at runtime without restarting the server.
+- **`watch_ports_snapshot` / `watcher_info`** tools: capture a one-shot snapshot from the `PortWatcher` event queue and query platform-specific watcher strategy details.
+- **`agent_id` field** added to all destructive tool input schemas (`kill_port`, `kill_pid`, `kill_process`, `stop_service`, `swap`) for per-agent identity tracking and audit correlation.
+- **Dynamic MCP v2 safety evaluation**: `_check_mcp_safety()` now calls `mcp_rules.evaluate()` after static policy checks, enabling per-agent rule enforcement at the RPC call level.
+
+### Fixed
+
+- **False-positive process matching** (`kport -ip kport` matching `language_server_windows_x64.exe` and `Antigravity IDE.exe`): replaced loose `target in cmdline` substring check with `matches_process_name()` which inspects only binary name and runtime target.
+- **`psutil.AccessDenied` on system PIDs**: `cmdline()` access guarded — only called when `p.name()` is in `RUNTIME_ENRICHMENT_NAMES`, preventing crashes during process list iteration on Windows.
+- **Parent PID inconsistency**: `kport -ip` now displays `(terminated)` for dead parents, matching the output of `kport --pid`.
+
+### Changed
+
+- **CLI module refactoring**: Extracted command handlers and orchestration logic into new `cli_commands.py` module for cleaner separation between argument parsing and command execution.
+- **`pyproject.toml`**: Added Python 3.13 classifier; project now tested and certified on Python 3.8 – 3.13.
+
+### Testing
+
+- **440 tests, 1 skipped** (up from 335 in v5.2.0) — **0 failures, 0 ruff lint errors**.
+- New test suites added: `tests/unit/test_enrichment.py`, `tests/mcp/test_mcp_features.py`, `tests/mcp/test_mcp_pid_tools.py`, `tests/mcp/test_mcp_safety.py`.
+- Updated `tests/mcp/test_mcp_server.py` and `tests/mcp/test_mcp_tools.py` to reflect the expanded 21-tool MCP surface.
+- Test reorganisation: all test files renamed to reflect their subject (e.g. `test_enrichment.py`, `test_mcp_features.py`) rather than roadmap phase numbers.
+
+---
+
 ## [5.2.0] - 2026-10-11
 
 ### Added

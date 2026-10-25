@@ -28,6 +28,7 @@ from .docker_engine import (
     docker_mappings_for_host_port,
     list_docker_mappings,
 )
+from .k8s_detector import detect_k8s_proxy
 from .process_manager import detect_process_manager
 from .project import resolve_project
 from .safety import resolve_protected_sets
@@ -40,17 +41,55 @@ if TYPE_CHECKING:
 # Port Diagnosis
 # ---------------------------------------------------------------------------
 
+
+def classify_binding_scope(laddr: str, family: str = "IPv4") -> tuple[str, str]:
+    """Classify socket local address into scope key and human-readable label.
+
+    Returns
+    -------
+    (scope_key, scope_label):
+        scope_key: 'loopback', 'wildcard_ipv4', 'wildcard_ipv6', 'specific_ip', 'unknown'
+        scope_label: 'Loopback only', 'All IPv4 interfaces (0.0.0.0)', etc.
+    """
+    if not laddr:
+        return "unknown", "Unknown"
+
+    clean = laddr.strip()
+    if clean.startswith("[") and "]" in clean:
+        host = clean[1 : clean.index("]")]
+    elif clean.count(":") >= 2:
+        host = clean.rsplit(":", 1)[0] if ":" in clean else clean
+    elif ":" in clean:
+        host = clean.rsplit(":", 1)[0]
+    else:
+        host = clean
+
+    host_lower = host.lower()
+    fam_lower = (family or "").lower()
+
+    if host_lower in ("127.0.0.1", "::1", "localhost") or host_lower.startswith("127."):
+        return "loopback", "Loopback only"
+    if host_lower in ("0.0.0.0", "*"):
+        return "wildcard_ipv4", "All IPv4 interfaces (0.0.0.0)"
+    if host_lower in ("::", "") and ("ipv6" in fam_lower or "inet6" in fam_lower or "::" in clean):
+        return "wildcard_ipv6", "All IPv6 interfaces (::)"
+    if host_lower == "::":
+        return "wildcard_ipv6", "All IPv6 interfaces (::)"
+
+    return "specific_ip", f"Specific interface ({host})"
+
+
 def diagnose_port(
     port: int,
     inspector: BaseInspector,
-    proto: str = "tcp",
+    proto: str = "both",
     config: dict[str, Any] | None = None,
     bypass_safety: bool = False,
 ) -> dict[str, Any]:
     """Compute a structured diagnostic report for *port*.
 
     Returns a plain dict with keys:
-      port, blocked, observations, inferences, risks, recommendations
+      port, blocked, observations, inferences, risks, recommendations, companion_hints
 
     This function is **read-only** — it never kills or modifies anything.
     Safety-shield enforcement is the responsibility of the caller for
@@ -89,8 +128,11 @@ def diagnose_port(
     obs_processes = []
     for pid in pids:
         info = inspector.get_process_info(pid)
+        pid_protos = sorted({(b.proto or "tcp").lower() for b in local_bindings if b.pid == pid})
+        proto_str = "/".join(pid_protos) if pid_protos else "tcp"
         if info:
             proc_dict = asdict(info)
+            proc_dict["proto"] = proto_str
             # Enrich with parent process name for lineage context
             if info.ppid:
                 parent_info = inspector.get_process_info(info.ppid)
@@ -100,13 +142,43 @@ def diagnose_port(
             obs_processes.append(proc_dict)
         else:
             obs_processes.append(
-                {"pid": pid, "name": "unknown", "exe": None, "cmdline": None,
-                 "user": None, "ppid": None, "parent_name": None, "cwd": None,
-                 "start_time": None}
+                {
+                    "pid": pid,
+                    "name": "unknown",
+                    "exe": None,
+                    "cmdline": None,
+                    "user": None,
+                    "ppid": None,
+                    "parent_name": None,
+                    "cwd": None,
+                    "start_time": None,
+                    "proto": proto_str,
+                }
             )
 
     obs_docker = [asdict(m) for m in docker_hits]
     obs_bindings = [asdict(b) for b in local_bindings]
+    for b_dict in obs_bindings:
+        scope, label = classify_binding_scope(b_dict.get("laddr", ""), b_dict.get("family", "IPv4"))
+        b_dict["scope"] = scope
+        b_dict["scope_label"] = label
+
+    if obs_bindings:
+        scopes = {b["scope"] for b in obs_bindings}
+        if "wildcard_ipv4" in scopes and "wildcard_ipv6" in scopes:
+            binding_scope = "dual_stack"
+        elif "wildcard_ipv4" in scopes:
+            binding_scope = "wildcard_ipv4"
+        elif "wildcard_ipv6" in scopes:
+            binding_scope = "wildcard_ipv6"
+        elif scopes == {"loopback"}:
+            binding_scope = "loopback"
+        elif "specific_ip" in scopes:
+            binding_scope = "specific_ip"
+        else:
+            binding_scope = next(iter(scopes)) if scopes else "unknown"
+    else:
+        binding_scope = None
 
     # Active connections on this port (bounded to 50 to keep response tight)
     try:
@@ -114,11 +186,20 @@ def diagnose_port(
     except Exception:
         port_connections = []
 
+    stale_states = {"TIME_WAIT", "CLOSE_WAIT", "FIN_WAIT_1", "FIN_WAIT_2", "LAST_ACK", "CLOSING"}
+    stale_conns = [c for c in port_connections if (c.get("state") or "").upper() in stale_states]
+
+    # Stale socket check when no process is actively listening
+    if not is_blocked and stale_conns:
+        is_blocked = True
+        obs_type = "stale-socket"
+
     observations = {
         "port": port,
         "blocked": is_blocked,
         "type": obs_type,
         "bindings": obs_bindings,
+        "binding_scope": binding_scope,
         "processes": obs_processes,
         "docker_containers": obs_docker,
         "connections": port_connections,
@@ -134,17 +215,41 @@ def diagnose_port(
 
         pm_info = detect_process_manager(pid)
         if pm_info:
-            inferences.append({
-                "type": "process_manager",
-                "pid": pid,
-                "manager": pm_info["manager"],
-                "name": pm_info["name"],
-                "confidence": "high",
-                "reason": (
-                    f"Process {pid} is running under process manager "
-                    f"'{pm_info['manager']}' service '{pm_info['name']}'"
-                ),
-            })
+            inferences.append(
+                {
+                    "type": "process_manager",
+                    "pid": pid,
+                    "manager": pm_info["manager"],
+                    "name": pm_info["name"],
+                    "confidence": "high",
+                    "reason": (
+                        f"Process {pid} is running under process manager "
+                        f"'{pm_info['manager']}' service '{pm_info['name']}'"
+                    ),
+                }
+            )
+
+        k8s_info = detect_k8s_proxy(p.get("cmdline"), p.get("name"))
+        if k8s_info:
+            inferences.append(
+                {
+                    "type": "k8s_port_forward",
+                    "pid": pid,
+                    "tool": k8s_info.tool,
+                    "proxy_type": k8s_info.proxy_type,
+                    "resource": k8s_info.resource,
+                    "namespace": k8s_info.namespace,
+                    "remote_port": k8s_info.remote_port,
+                    "local_port": k8s_info.local_port,
+                    "confidence": "high",
+                    "reason": (
+                        f"Process {pid} ({p.get('name') or 'unknown'}) is a Kubernetes "
+                        f"{k8s_info.proxy_type} proxy forwarding port {port} to cluster resource "
+                        f"'{k8s_info.resource or 'remote'}'"
+                        f"{f' in namespace {k8s_info.namespace}' if k8s_info.namespace else ''}."
+                    ),
+                }
+            )
 
         cwd = p.get("cwd")
         project = resolve_project(cwd)
@@ -160,32 +265,106 @@ def diagnose_port(
 
             reason_str = f"Process {pid} cwd ({cwd!r}) is inside {' '.join(context_desc)}"
 
-            inferences.append({
-                "type": "project_context",
-                "pid": pid,
-                "git_root": project.git_root,
-                "project_name": project.project_name,
-                "branch": project.branch,
-                "remote_origin": project.remote_origin,
-                "is_worktree": project.is_worktree,
-                "manifest_path": project.manifest_path,
-                "manifest_type": project.manifest_type,
-                "framework": project.framework,
-                "confidence": "high" if project.manifest_path else "medium",
-                "reason": reason_str,
-            })
+            inferences.append(
+                {
+                    "type": "project_context",
+                    "pid": pid,
+                    "git_root": project.git_root,
+                    "project_name": project.project_name,
+                    "branch": project.branch,
+                    "remote_origin": project.remote_origin,
+                    "is_worktree": project.is_worktree,
+                    "manifest_path": project.manifest_path,
+                    "manifest_type": project.manifest_type,
+                    "framework": project.framework,
+                    "confidence": "high" if project.manifest_path else "medium",
+                    "reason": reason_str,
+                }
+            )
 
     for d in obs_docker:
-        inferences.append({
-            "type": "docker_isolation",
-            "container_name": d["container_name"],
-            "container_id": d["container_id"],
-            "confidence": "high",
-            "reason": (
-                f"Container '{d['container_name']}' isolates the socket in a "
-                f"virtual network namespace mapped to host port {d['host_port']}"
-            ),
-        })
+        inferences.append(
+            {
+                "type": "docker_isolation",
+                "container_name": d["container_name"],
+                "container_id": d["container_id"],
+                "confidence": "high",
+                "reason": (
+                    f"Container '{d['container_name']}' isolates the socket in a "
+                    f"virtual network namespace mapped to host port {d['host_port']}"
+                ),
+            }
+        )
+
+    # Scope & Reachability inferences
+    is_loopback_only = bool(obs_bindings) and all(b.get("scope") == "loopback" for b in obs_bindings)
+    if is_loopback_only and is_blocked and obs_type != "stale-socket":
+        inferences.append(
+            {
+                "type": "loopback_restriction",
+                "confidence": "high",
+                "reason": (
+                    "Service is running locally but UNREACHABLE by external containers or "
+                    "network peers because it is not bound to 0.0.0.0."
+                ),
+            }
+        )
+
+    # Dual-stack & IPv6 shadowing inferences
+    has_ipv4_wc = any(b.get("scope") == "wildcard_ipv4" for b in obs_bindings)
+    has_ipv6_wc = any(b.get("scope") == "wildcard_ipv6" for b in obs_bindings)
+    if has_ipv4_wc and has_ipv6_wc:
+        inferences.append(
+            {
+                "type": "dual_stack",
+                "confidence": "high",
+                "reason": (
+                    f"Port {port} has both IPv4 (0.0.0.0) and IPv6 (::) wildcard listeners. "
+                    "The service is accessible across both IPv4 and IPv6 network stacks."
+                ),
+            }
+        )
+    elif has_ipv6_wc and not has_ipv4_wc:
+        inferences.append(
+            {
+                "type": "ipv6_shadowing",
+                "confidence": "medium",
+                "reason": (
+                    f"Port {port} is bound to IPv6 wildcard (:::{port}). Depending on OS IPV6_V6ONLY "
+                    "socket configuration, this listener may intercept or shadow IPv4 traffic."
+                ),
+            }
+        )
+
+    # Stale & Zombie socket states
+    if stale_conns:
+        distinct_states = sorted({(c.get("state") or "").upper() for c in stale_conns})
+        states_str = "/".join(distinct_states)
+        if obs_type == "stale-socket":
+            inferences.append(
+                {
+                    "type": "stale_socket",
+                    "confidence": "high",
+                    "states": distinct_states,
+                    "count": len(stale_conns),
+                    "reason": (
+                        f"Port {port} has {len(stale_conns)} socket(s) lingering in {states_str} state "
+                        "without an active process owner. The OS kernel is holding the socket until timeout expires."
+                    ),
+                }
+            )
+        else:
+            inferences.append(
+                {
+                    "type": "lingering_connections",
+                    "confidence": "medium",
+                    "states": distinct_states,
+                    "count": len(stale_conns),
+                    "reason": (
+                        f"Port {port} has {len(stale_conns)} connection(s) lingering in {states_str} state alongside active listeners."
+                    ),
+                }
+            )
 
     # ------------------------------------------------------------------
     # 3. Risks
@@ -196,56 +375,135 @@ def diagnose_port(
     for b in local_bindings:
         laddr_ip = b.laddr.split(":")[0] if ":" in b.laddr else b.laddr
         if laddr_ip in ("0.0.0.0", "::", "*"):
-            risks.append({
-                "type": "public_exposure",
+            risks.append(
+                {
+                    "type": "public_exposure",
+                    "message": (f"Socket {b.laddr} bound to wildcard address ({laddr_ip}) - exposed to local network"),
+                    "severity": "WARNING",
+                }
+            )
+
+    # Loopback leak risk
+    if is_loopback_only and is_blocked and obs_type != "stale-socket":
+        risks.append(
+            {
+                "type": "loopback_leak",
                 "message": (
-                    f"Socket {b.laddr} bound to wildcard address ({laddr_ip})"
-                    " - exposed to local network"
+                    f"Port {port} is bound to loopback only ({', '.join(b.get('laddr', '') for b in obs_bindings)}). "
+                    "External network peers and container bridges cannot connect."
                 ),
-                "severity": "WARNING",
-            })
+                "severity": "INFO",
+            }
+        )
+
+    # IPv6 shadowing risk
+    if has_ipv6_wc and not has_ipv4_wc:
+        risks.append(
+            {
+                "type": "ipv6_shadowing_risk",
+                "message": (
+                    f"IPv6 wildcard listener on port {port} may block or shadow IPv4 binds depending on IPV6_V6ONLY socket flag."
+                ),
+                "severity": "INFO",
+            }
+        )
+
+    # Stale socket risk
+    if stale_conns:
+        distinct_states = sorted({(c.get("state") or "").upper() for c in stale_conns})
+        states_str = "/".join(distinct_states)
+        if obs_type == "stale-socket":
+            risks.append(
+                {
+                    "type": "stale_socket_lingering",
+                    "message": (
+                        f"Socket(s) in {states_str} state can cause EADDRINUSE on re-binding unless SO_REUSEADDR is enabled."
+                    ),
+                    "severity": "WARNING",
+                }
+            )
+        elif "CLOSE_WAIT" in distinct_states:
+            risks.append(
+                {
+                    "type": "close_wait_leak",
+                    "message": (
+                        f"Connection(s) in CLOSE_WAIT detected on port {port}. Remote endpoint closed the connection "
+                        "but local process has not closed socket."
+                    ),
+                    "severity": "WARNING",
+                }
+            )
 
     # Safety-shield informational risks (read-only annotation)
-    protected_ports, protected_procs = resolve_protected_sets(config)
+    protected_ports, protected_procs, _protected_udp = resolve_protected_sets(config)
 
-    is_protected_port = port in protected_ports
+    is_protected_udp_port = proto in ("udp", "both") and port in _protected_udp
+    is_protected_port = (port in protected_ports) or is_protected_udp_port
     is_protected_process = False
     protected_pids: list[int] = []
 
-    if is_protected_port:
-        risks.append({
-            "type": "protected_port",
-            "message": (
-                f"Port {port} is listed in protected ports. "
-                "Termination will be blocked by default."
-            ),
-            "severity": "IMPORTANT",
-        })
+    if port in protected_ports:
+        risks.append(
+            {
+                "type": "protected_port",
+                "message": (f"Port {port} is listed in protected ports. Termination will be blocked by default."),
+                "severity": "IMPORTANT",
+            }
+        )
+    elif is_protected_udp_port:
+        risks.append(
+            {
+                "type": "protected_udp_port",
+                "message": (
+                    f"Port {port}/UDP is a protected system UDP service (e.g. DNS, DHCP, NTP). "
+                    "Termination will be blocked by default."
+                ),
+                "severity": "IMPORTANT",
+            }
+        )
+
+    has_tcp = any("tcp" in (p.get("proto") or "tcp").lower() for p in obs_processes)
+    has_udp = any("udp" in (p.get("proto") or "").lower() for p in obs_processes)
+    if has_tcp and has_udp:
+        risks.append(
+            {
+                "type": "dual_protocol_conflict",
+                "message": (
+                    f"Dual-protocol binding detected: Port {port} has both TCP and UDP listeners. "
+                    "You can inspect or kill each individually using '--proto tcp' or '--proto udp'."
+                ),
+                "severity": "INFO",
+            }
+        )
 
     for p in obs_processes:
         base_name = p["name"].lower().split(" (")[0]
         if base_name in protected_procs:
             is_protected_process = True
             protected_pids.append(p["pid"])
-            risks.append({
-                "type": "protected_process",
-                "message": (
-                    f"PID {p['pid']} ({p['name']}) is listed in protected processes. "
-                    "Termination will be blocked by default."
-                ),
-                "severity": "IMPORTANT",
-            })
+            risks.append(
+                {
+                    "type": "protected_process",
+                    "message": (
+                        f"PID {p['pid']} ({p['name']}) is listed in protected processes. "
+                        "Termination will be blocked by default."
+                    ),
+                    "severity": "IMPORTANT",
+                }
+            )
 
     for inf in inferences:
         if inf["type"] == "process_manager":
-            risks.append({
-                "type": "auto_restart",
-                "message": (
-                    f"PID {inf['pid']} is managed by {inf['manager']}. "
-                    "Standard termination will trigger auto-restart."
-                ),
-                "severity": "WARNING",
-            })
+            risks.append(
+                {
+                    "type": "auto_restart",
+                    "message": (
+                        f"PID {inf['pid']} is managed by {inf['manager']}. "
+                        "Standard termination will trigger auto-restart."
+                    ),
+                    "severity": "WARNING",
+                }
+            )
 
     # ------------------------------------------------------------------
     # 4. Recommendations (informational — caller decides to act)
@@ -255,41 +513,70 @@ def diagnose_port(
     safety_blocks = (is_protected_port or is_protected_process) and not bypass_safety
 
     if not is_blocked:
-        recommendations.append({
-            "action": "bind",
-            "command": None,
-            "reason": "Port is free and available to bind.",
-            "safe": True,
-        })
+        recommendations.append(
+            {
+                "action": "bind",
+                "command": None,
+                "reason": "Port is free and available to bind.",
+                "safe": True,
+            }
+        )
+    elif obs_type == "stale-socket":
+        distinct_states = sorted({(c.get("state") or "").upper() for c in stale_conns})
+        states_str = "/".join(distinct_states)
+        recommendations.append(
+            {
+                "action": "wait_or_reuseaddr",
+                "command": None,
+                "reason": (
+                    f"Wait for OS kernel cleanup timeout (~60s for {states_str}), or configure application socket with SO_REUSEADDR."
+                ),
+                "safe": True,
+            }
+        )
     elif safety_blocks:
         reasons = []
         if is_protected_port:
             reasons.append(f"Port {port} is protected")
         if is_protected_process:
-            reasons.append(
-                f"Process(es) {', '.join(map(str, protected_pids))} are protected"
-            )
-        recommendations.append({
-            "action": "abort",
-            "command": None,
-            "reason": (
-                f"Safety Shield Active: {' and '.join(reasons)}. "
-                "Termination aborted. To override, re-run with --bypass-safety."
-            ),
-            "safe": False,
-        })
+            reasons.append(f"Process(es) {', '.join(map(str, protected_pids))} are protected")
+        recommendations.append(
+            {
+                "action": "abort",
+                "command": None,
+                "reason": (
+                    f"Safety Shield Active: {' and '.join(reasons)}. "
+                    "Termination aborted. To override, re-run with --bypass-safety."
+                ),
+                "safe": False,
+            }
+        )
     elif obs_docker:
         d = obs_docker[0]
-        recommendations.append({
-            "action": "stop_docker_container",
-            "command": f"kport kill {port} --docker-action stop",
-            "reason": (
-                f"Port belongs to Docker container '{d['container_name']}'. "
-                "Stop container cleanly to release port."
-            ),
-            "safe": True,
-        })
+        recommendations.append(
+            {
+                "action": "stop_docker_container",
+                "command": f"kport kill {port} --docker-action stop",
+                "reason": (
+                    f"Port belongs to Docker container '{d['container_name']}'. Stop container cleanly to release port."
+                ),
+                "safe": True,
+            }
+        )
     else:
+        if is_loopback_only:
+            recommendations.append(
+                {
+                    "action": "rebind_wildcard",
+                    "command": None,
+                    "reason": (
+                        "Configure server host to '0.0.0.0' in your application settings if "
+                        "access from other machines or Docker containers is required."
+                    ),
+                    "safe": True,
+                }
+            )
+
         pm_managed = [inf for inf in inferences if inf["type"] == "process_manager"]
         if pm_managed:
             pm = pm_managed[0]
@@ -307,37 +594,130 @@ def diagnose_port(
                     cmd = " ; ".join(f"Stop-Service -Name {s}" for s in services)
             else:
                 cmd = f"kport kill {port}"
-            recommendations.append({
-                "action": "stop_service",
-                "command": cmd,
-                "reason": (
-                    f"Process is managed by {pm['manager']}. "
-                    "Stopping via the service manager prevents auto-restart."
-                ),
-                "safe": True,
-            })
+            recommendations.append(
+                {
+                    "action": "stop_service",
+                    "command": cmd,
+                    "reason": (
+                        f"Process is managed by {pm['manager']}. "
+                        "Stopping via the service manager prevents auto-restart."
+                    ),
+                    "safe": True,
+                }
+            )
+        elif any(inf["type"] == "k8s_port_forward" for inf in inferences):
+            k8s_inf = next(inf for inf in inferences if inf["type"] == "k8s_port_forward")
+            recommendations.append(
+                {
+                    "action": "stop_k8s_proxy",
+                    "command": f"kport kill {port}",
+                    "reason": (
+                        f"Port {port} is proxied to Kubernetes ({k8s_inf.get('resource') or 'cluster'}). "
+                        f"Terminating PID {k8s_inf['pid']} ({k8s_inf['tool']}) ends the port-forward session."
+                    ),
+                    "safe": True,
+                }
+            )
         elif obs_type == "local-unknown":
-            recommendations.append({
-                "action": "escalate_privileges",
-                "command": (
-                    f"sudo kport diagnose {port}"
-                    if sys.platform != "win32"
-                    else "Run terminal as Administrator"
-                ),
-                "reason": (
-                    "Port is occupied but owning process is not visible. "
-                    "Diagnose with administrator/root privileges."
-                ),
-                "safe": True,
-            })
+            recommendations.append(
+                {
+                    "action": "escalate_privileges",
+                    "command": (
+                        f"sudo kport diagnose {port}" if sys.platform != "win32" else "Run terminal as Administrator"
+                    ),
+                    "reason": (
+                        "Port is occupied but owning process is not visible. "
+                        "Diagnose with administrator/root privileges."
+                    ),
+                    "safe": True,
+                }
+            )
         else:
-            pids_str = " ".join(str(p["pid"]) for p in obs_processes)
-            recommendations.append({
-                "action": "kill_processes",
-                "command": f"kport kill {port}",
-                "reason": f"Terminate standard local process(es) on port (PIDs: {pids_str})",
-                "safe": True,
-            })
+            if has_tcp and has_udp:
+                tcp_pids = " ".join(str(p["pid"]) for p in obs_processes if "tcp" in (p.get("proto") or "tcp").lower())
+                udp_pids = " ".join(str(p["pid"]) for p in obs_processes if "udp" in (p.get("proto") or "").lower())
+                recommendations.append(
+                    {
+                        "action": "kill_tcp_only",
+                        "command": f"kport kill {port} --proto tcp",
+                        "reason": f"Terminate only TCP listener on port {port} (PIDs: {tcp_pids})",
+                        "safe": True,
+                    }
+                )
+                recommendations.append(
+                    {
+                        "action": "kill_udp_only",
+                        "command": f"kport kill {port} --proto udp",
+                        "reason": f"Terminate only UDP listener on port {port} (PIDs: {udp_pids})",
+                        "safe": True,
+                    }
+                )
+                recommendations.append(
+                    {
+                        "action": "kill_both",
+                        "command": f"kport kill {port}",
+                        "reason": f"Terminate all listeners (both TCP and UDP) on port {port}",
+                        "safe": True,
+                    }
+                )
+            else:
+                pids_str = " ".join(str(p["pid"]) for p in obs_processes)
+                recommendations.append(
+                    {
+                        "action": "kill_processes",
+                        "command": f"kport kill {port}",
+                        "reason": f"Terminate standard local process(es) on port (PIDs: {pids_str})",
+                        "safe": True,
+                    }
+                )
+
+    # ------------------------------------------------------------------
+    # 5. Companion Tool Hints (netcheck)
+    # ------------------------------------------------------------------
+    companion_hints: list[dict[str, Any]] = []
+    if not is_blocked:
+        companion_hints.append(
+            {
+                "tool": "netcheck",
+                "command": f"netcheck tcp <host>:{port}",
+                "description": (
+                    f"To probe whether port {port} is open or reachable on a remote peer, run:\n"
+                    f"  netcheck tcp <host>:{port}"
+                ),
+            }
+        )
+    elif obs_type == "stale-socket":
+        companion_hints.append(
+            {
+                "tool": "netcheck",
+                "command": f"netcheck tcp 127.0.0.1:{port}",
+                "description": (
+                    f"To verify if lingering socket rejects or accepts new connections, run:\n"
+                    f"  netcheck tcp 127.0.0.1:{port}"
+                ),
+            }
+        )
+    elif is_loopback_only:
+        companion_hints.append(
+            {
+                "tool": "netcheck",
+                "command": f"netcheck tcp <ip>:{port}",
+                "description": (
+                    f"To verify remote connectivity from another machine or container, run:\n  netcheck tcp <ip>:{port}"
+                ),
+            }
+        )
+    else:
+        companion_hints.append(
+            {
+                "tool": "netcheck",
+                "command": f"netcheck tcp <ip>:{port}",
+                "description": (
+                    "To verify network reachability from outside this machine or container, run:\n"
+                    f"  netcheck tcp <ip>:{port}"
+                ),
+            }
+        )
 
     suggested_alt = suggest_next_free_port(port, count=1, inspector=inspector, proto=proto) if is_blocked else []
 
@@ -348,6 +728,7 @@ def diagnose_port(
         "inferences": inferences,
         "risks": risks,
         "recommendations": recommendations,
+        "companion_hints": companion_hints,
         "alternative_port": suggested_alt[0] if suggested_alt else None,
     }
 
@@ -357,7 +738,7 @@ def suggest_next_free_port(
     count: int = 1,
     max_attempts: int = 20,
     inspector: BaseInspector | None = None,
-    proto: str = "tcp",
+    proto: str = "both",
 ) -> list[int]:
     """Find the next available port(s) starting from start_port + 1 up to start_port + max_attempts."""
     if inspector is None:
@@ -380,6 +761,7 @@ def suggest_next_free_port(
 # ---------------------------------------------------------------------------
 # Doctor / Environment Diagnostics
 # ---------------------------------------------------------------------------
+
 
 def _doctor_platform_info() -> dict:
     """Return a minimal, non-sensitive snapshot of the inspection environment."""
@@ -406,9 +788,7 @@ def _doctor_capabilities(platform_info: dict) -> dict:
     notes: list[str] = []
 
     if not platform_info["psutil_available"]:
-        limitations.append(
-            "psutil is not installed — using OS-native fallback inspector"
-        )
+        limitations.append("psutil is not installed — using OS-native fallback inspector")
     elif not platform_info["psutil_accessible"]:
         limitations.append(
             "psutil is installed but cannot enumerate connections "
@@ -418,9 +798,7 @@ def _doctor_capabilities(platform_info: dict) -> dict:
     if platform_info["os"] == "Windows":
         notes.append("Process owner resolution uses tasklist and ctypes (no /proc)")
     elif platform_info["os"] == "Darwin":
-        notes.append(
-            "macOS: connection enumeration uses lsof if psutil is unavailable"
-        )
+        notes.append("macOS: connection enumeration uses lsof if psutil is unavailable")
 
     return {
         "can_inspect_connections": True,
@@ -461,30 +839,31 @@ def _doctor_listener_findings(
         listeners_out.append(entry)
 
         if is_wildcard:
-            findings.append({
-                "severity": "WARNING",
-                "category": "listener",
-                "message": (
-                    f"Port {b.port} is bound to wildcard address ({ip}), "
-                    f"exposing it to the local network"
-                    + (f" — observed process: {b.process_name}" if b.process_name else "")
-                ),
-            })
+            findings.append(
+                {
+                    "severity": "WARNING",
+                    "category": "listener",
+                    "message": (
+                        f"Port {b.port} is bound to wildcard address ({ip}), "
+                        f"exposing it to the local network"
+                        + (f" — observed process: {b.process_name}" if b.process_name else "")
+                    ),
+                }
+            )
 
     for port, group in port_groups.items():
-        ips = {
-            (b.laddr.rsplit(":", 1)[0] if ":" in b.laddr else b.laddr)
-            for b in group
-        }
+        ips = {(b.laddr.rsplit(":", 1)[0] if ":" in b.laddr else b.laddr) for b in group}
         if "0.0.0.0" in ips and "::" in ips:
-            findings.append({
-                "severity": "INFO",
-                "category": "listener",
-                "message": (
-                    f"Port {port} has both IPv4 (0.0.0.0) and IPv6 (::) wildcard "
-                    "listeners — dual-stack binding (normal for many servers)"
-                ),
-            })
+            findings.append(
+                {
+                    "severity": "INFO",
+                    "category": "listener",
+                    "message": (
+                        f"Port {port} has both IPv4 (0.0.0.0) and IPv6 (::) wildcard "
+                        "listeners — dual-stack binding (normal for many servers)"
+                    ),
+                }
+            )
 
     return listeners_out
 
@@ -504,8 +883,7 @@ def _doctor_connection_summary(conns: list) -> dict:
         "TIME_WAIT": state_counts.get("TIME_WAIT", 0),
         "CLOSE_WAIT": state_counts.get("CLOSE_WAIT", 0),
         "other": sum(
-            v for k, v in state_counts.items()
-            if k not in ("LISTEN", "ESTABLISHED", "TIME_WAIT", "CLOSE_WAIT")
+            v for k, v in state_counts.items() if k not in ("LISTEN", "ESTABLISHED", "TIME_WAIT", "CLOSE_WAIT")
         ),
     }
 
@@ -550,15 +928,17 @@ def _doctor_process_findings(
                 "manager": pm_info["manager"],
                 "name": pm_info["name"],
             }
-            findings.append({
-                "severity": "INFO",
-                "category": "service",
-                "message": (
-                    f"PID {pid} ({proc_entry['name']}) appears to be managed by "
-                    f"{pm_info['manager']} service '{pm_info['name']}' — "
-                    "stopping via process manager is preferred over direct kill"
-                ),
-            })
+            findings.append(
+                {
+                    "severity": "INFO",
+                    "category": "service",
+                    "message": (
+                        f"PID {pid} ({proc_entry['name']}) appears to be managed by "
+                        f"{pm_info['manager']} service '{pm_info['name']}' — "
+                        "stopping via process manager is preferred over direct kill"
+                    ),
+                }
+            )
         else:
             proc_entry["service_manager"] = None
 
@@ -587,14 +967,13 @@ def _doctor_process_findings(
             if proj.branch:
                 context_desc.append(f"on branch '{proj.branch}'")
 
-            findings.append({
-                "severity": "INFO",
-                "category": "project",
-                "message": (
-                    f"PID {pid} ({proc_entry['name']}) is associated with "
-                    f"{' '.join(context_desc)}"
-                ),
-            })
+            findings.append(
+                {
+                    "severity": "INFO",
+                    "category": "project",
+                    "message": (f"PID {pid} ({proc_entry['name']}) is associated with {' '.join(context_desc)}"),
+                }
+            )
 
         proc_entry["project"] = project_info
         proc_entries.append(proc_entry)
@@ -608,24 +987,25 @@ def _doctor_docker_section(
 ) -> dict:
     """Query Docker for host-port mappings relevant to listening ports."""
     if not docker_available():
-        findings.append({
-            "severity": "INFO",
-            "category": "docker",
-            "message": "Docker CLI not found on PATH — Docker container inspection skipped",
-        })
+        findings.append(
+            {
+                "severity": "INFO",
+                "category": "docker",
+                "message": "Docker CLI not found on PATH — Docker container inspection skipped",
+            }
+        )
         return {"available": False, "containers": []}
 
     try:
         all_mappings = list_docker_mappings()
     except Exception:
-        findings.append({
-            "severity": "INFO",
-            "category": "docker",
-            "message": (
-                "Docker is available but could not be queried "
-                "(daemon not running or permission denied)"
-            ),
-        })
+        findings.append(
+            {
+                "severity": "INFO",
+                "category": "docker",
+                "message": ("Docker is available but could not be queried (daemon not running or permission denied)"),
+            }
+        )
         return {"available": True, "daemon_accessible": False, "containers": []}
 
     if not all_mappings:
@@ -635,14 +1015,16 @@ def _doctor_docker_section(
     relevant = [m for m in all_mappings if m.host_port in listener_ports]
 
     for m in relevant:
-        findings.append({
-            "severity": "INFO",
-            "category": "docker",
-            "message": (
-                f"Host port {m.host_port} is mapped to container "
-                f"'{m.container_name}' (port {m.container_port}/{m.proto})"
-            ),
-        })
+        findings.append(
+            {
+                "severity": "INFO",
+                "category": "docker",
+                "message": (
+                    f"Host port {m.host_port} is mapped to container "
+                    f"'{m.container_name}' (port {m.container_port}/{m.proto})"
+                ),
+            }
+        )
 
     containers_out = [
         {
@@ -684,13 +1066,15 @@ def run_doctor(inspector: BaseInspector) -> dict[str, Any]:
     # 2. Listeners
     bindings: list = []
     try:
-        bindings = inspector.list_listening(proto="tcp")
+        bindings = inspector.list_listening(proto="both")
     except Exception as exc:
-        findings.append({
-            "severity": "WARNING",
-            "category": "capability",
-            "message": f"Could not enumerate listening ports: {exc}",
-        })
+        findings.append(
+            {
+                "severity": "WARNING",
+                "category": "capability",
+                "message": f"Could not enumerate listening ports: {exc}",
+            }
+        )
 
     listeners_out = _doctor_listener_findings(bindings, findings)
 
@@ -699,11 +1083,13 @@ def run_doctor(inspector: BaseInspector) -> dict[str, Any]:
     try:
         conns = inspector.list_connections()
     except Exception as exc:
-        findings.append({
-            "severity": "WARNING",
-            "category": "capability",
-            "message": f"Could not enumerate network connections: {exc}",
-        })
+        findings.append(
+            {
+                "severity": "WARNING",
+                "category": "capability",
+                "message": f"Could not enumerate network connections: {exc}",
+            }
+        )
 
     conn_summary = _doctor_connection_summary(conns)
 
@@ -712,46 +1098,54 @@ def run_doctor(inspector: BaseInspector) -> dict[str, Any]:
     try:
         proc_entries = _doctor_process_findings(bindings, inspector, findings)
     except Exception as exc:
-        findings.append({
-            "severity": "WARNING",
-            "category": "capability",
-            "message": f"Could not resolve process context: {exc}",
-        })
+        findings.append(
+            {
+                "severity": "WARNING",
+                "category": "capability",
+                "message": f"Could not resolve process context: {exc}",
+            }
+        )
 
     # 6. Docker
     docker_section: dict = {}
     try:
         docker_section = _doctor_docker_section(bindings, findings)
     except Exception as exc:
-        findings.append({
-            "severity": "WARNING",
-            "category": "capability",
-            "message": f"Docker inspection failed: {exc}",
-        })
+        findings.append(
+            {
+                "severity": "WARNING",
+                "category": "capability",
+                "message": f"Docker inspection failed: {exc}",
+            }
+        )
         docker_section = {"available": False, "containers": []}
 
     # 7. High-level recommendations
     public_listeners = [ln for ln in listeners_out if ln.get("wildcard")]
     if public_listeners:
-        findings.append({
-            "severity": "RECOMMENDATION",
-            "category": "listener",
-            "message": (
-                f"{len(public_listeners)} listener(s) bound to wildcard address. "
-                "If intended for local development only, bind to 127.0.0.1 instead."
-            ),
-        })
+        findings.append(
+            {
+                "severity": "RECOMMENDATION",
+                "category": "listener",
+                "message": (
+                    f"{len(public_listeners)} listener(s) bound to wildcard address. "
+                    "If intended for local development only, bind to 127.0.0.1 instead."
+                ),
+            }
+        )
 
     capability_issues = [f for f in findings if f.get("category") == "capability"]
     if capability_issues:
-        findings.append({
-            "severity": "RECOMMENDATION",
-            "category": "capability",
-            "message": (
-                "Some inspection subsystems reported limitations. "
-                "Run with elevated privileges (sudo / Administrator) for full visibility."
-            ),
-        })
+        findings.append(
+            {
+                "severity": "RECOMMENDATION",
+                "category": "capability",
+                "message": (
+                    "Some inspection subsystems reported limitations. "
+                    "Run with elevated privileges (sudo / Administrator) for full visibility."
+                ),
+            }
+        )
 
     return {
         "platform": platform_info,
@@ -767,6 +1161,7 @@ def run_doctor(inspector: BaseInspector) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Conflict Detection
 # ---------------------------------------------------------------------------
+
 
 def detect_conflicts(inspector: BaseInspector) -> list[dict[str, Any]]:
     """Detect Docker/local port conflicts.
@@ -786,15 +1181,15 @@ def detect_conflicts(inspector: BaseInspector) -> list[dict[str, Any]]:
             pname = (info.name if info else "").lower()
             if "docker-proxy" in pname or pname.startswith("docker"):
                 continue
-            non_docker_pids.append(
-                {"pid": pid, "process": asdict(info) if info else None}
-            )
+            non_docker_pids.append({"pid": pid, "process": asdict(info) if info else None})
         if non_docker_pids:
-            conflicts.append({
-                "port": m.host_port,
-                "docker": asdict(m),
-                "local": non_docker_pids,
-            })
+            conflicts.append(
+                {
+                    "port": m.host_port,
+                    "docker": asdict(m),
+                    "local": non_docker_pids,
+                }
+            )
     return conflicts
 
 
@@ -802,12 +1197,14 @@ def detect_conflicts(inspector: BaseInspector) -> list[dict[str, Any]]:
 # Connection Filtering
 # ---------------------------------------------------------------------------
 
+
 def filter_connections(
     inspector: BaseInspector,
     pid: int | None = None,
     process: str | None = None,
     port: int | None = None,
     state: str | None = None,
+    proto: str = "both",
     max_results: int = 500,
 ) -> list[dict[str, Any]]:
     """Retrieve and filter active network connections.
@@ -826,6 +1223,8 @@ def filter_connections(
         If given, connections where local_port or remote_port equals this.
     state:
         If given, exact case-insensitive state match (e.g. ``"ESTABLISHED"``).
+    proto:
+        Protocol filter: ``"tcp"``, ``"udp"``, or ``"both"``.
     max_results:
         Hard cap on the number of results returned. Prevents unbounded responses
         on machines with thousands of connections. Default: 500.
@@ -837,20 +1236,18 @@ def filter_connections(
 
     if process:
         p_lower = process.lower()
-        conns = [
-            c for c in conns
-            if c.process_name and p_lower in c.process_name.lower()
-        ]
+        conns = [c for c in conns if c.process_name and p_lower in c.process_name.lower()]
 
     if port is not None:
-        conns = [
-            c for c in conns
-            if c.local_port == port or c.remote_port == port
-        ]
+        conns = [c for c in conns if c.local_port == port or c.remote_port == port]
 
     if state:
         s_upper = state.upper()
         conns = [c for c in conns if c.state and c.state.upper() == s_upper]
+
+    if proto and proto.lower() in ("tcp", "udp"):
+        p_target = proto.lower()
+        conns = [c for c in conns if (c.proto or "tcp").lower() == p_target]
 
     # Apply hard cap to prevent unbounded responses
     conns = conns[:max_results]

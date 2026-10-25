@@ -1,6 +1,6 @@
 # 🔪 kport - Cross-Platform Port Inspector and Killer
 
-[![Version](https://img.shields.io/badge/version-5.2.0-blue.svg)](https://github.com/farman20ali/kport)
+[![Version](https://img.shields.io/badge/version-5.3.0-blue.svg)](https://github.com/farman20ali/kport)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/farman20ali/kport)
@@ -186,16 +186,32 @@ kport --mcp
 python -m kport.mcp_server
 ```
 
-**Available MCP tools:**
+**Available MCP tools (21 total):**
+
+_Read-only / inspection_
 - `list_ports` — List all active listening ports (local + Docker)
 - `inspect_port` — Detailed info about a specific port
-- `kill_port` — Free a port (always respects the Safety Shield)
+- `inspect_pid` — Inspect a process by PID with port bindings and metadata
+- `inspect_process` — Inspect all processes matching a name; shows launchers, metadata, and related instances
 - `diagnose_port` — Structured diagnostic analysis (observations, inferences, risks, recommendations)
 - `list_connections` — Enumerate and filter active network connections (by PID, process, port, state)
 - `conflicts` — Detect Docker container vs native host process port collisions
 - `doctor` — Environment-wide diagnostics and system health check
+- `find_project` — Resolve a PID's working directory to a Git project context
+- `suggest_resolution` — AI-friendly remediation suggestions for a port conflict
 - `find_alternative_port` — Recommend next available free port(s) when `EADDRINUSE` occurs
 - `get_audit_history` — Inspect audit log history of destructive operations
+- `get_safety_rules` — Read the active MCP v2 rule set
+- `watch_ports_snapshot` — Capture a one-shot event snapshot from the PortWatcher
+- `watcher_info` — Query platform-specific watcher strategy details
+
+_Destructive / write_
+- `kill_port` — Free a port (always respects the Safety Shield)
+- `kill_pid` — Terminate a process by PID
+- `kill_process` — Terminate all processes matching a name
+- `stop_service` — Gracefully stop a Windows/systemd/pm2 service managing a port
+- `swap` — Atomically free a port and hand it over to a new process (zero-race)
+- `set_safety_rules` — Update the MCP v2 rule set at runtime
 
 Configure in Claude Desktop / Cursor / VS Code Copilot:
 

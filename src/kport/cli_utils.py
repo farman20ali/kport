@@ -90,6 +90,24 @@ def _is_elevated() -> bool:
     return (os.geteuid() == 0) if hasattr(os, "geteuid") else False
 
 
+def _has_access_denied_on_pids(pids: list[int]) -> bool:
+    """Detect whether reading socket info on any given PID fails with AccessDenied."""
+    try:
+        import psutil
+
+        for pid in pids:
+            try:
+                proc = psutil.Process(pid)
+                proc.net_connections(kind="all")
+            except (psutil.AccessDenied, PermissionError):
+                return True
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                continue
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
 def warn_if_path_missing() -> None:
     """Warn once (to stderr) if ~/.local/bin is not on PATH.
 
@@ -595,7 +613,11 @@ def confirm_docker_rm(
 
 
 def _poll_until_free(
-    port: int, timeout: float, inspector: BaseInspector, interval: float = 0.2
+    port: int,
+    timeout: float,
+    inspector: BaseInspector,
+    interval: float = 0.2,
+    proto: str = "both",
 ) -> bool:
     """Compatibility alias — delegates to :func:`kport.port_utils.poll_until_free`.
 
@@ -610,7 +632,7 @@ def _poll_until_free(
     """
     from .port_utils import poll_until_free
 
-    return poll_until_free(port, timeout, inspector, interval)
+    return poll_until_free(port, timeout, inspector, interval, proto=proto)
 
 
 # ---------------------------------------------------------------------------
