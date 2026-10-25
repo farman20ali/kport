@@ -108,16 +108,37 @@ def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
     warn_if_path_missing()
     parser = _QuietParser(
-        description="kport - Cross-platform port inspector and killer",
+        prog="kport",
+        description="kport - Cross-platform port inspector, manager, and automated killer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  kport -i 8080
-  kport -im 3000 3001 3002
-  kport -ir 3000-3010
-  kport -k 8080 --yes
+  # Inspect port or process:
   kport inspect 8080
-  kport kill 8080 --force
+  kport --pid 15768
+  kport -ip node
+
+  # Free a port or kill by PID:
+  kport kill 8080 --yes
+  kport -k 8080 -y
+  kport -k --pid 15768 -y
+  kport kill --pid 15768 -y
+  kport -im 8001 8000
+  kport -km 8001 8000
+
+  # Diagnose & troubleshoot:
+  kport diagnose 8080
+  kport doctor
+
+  # Real-time monitoring & CI/CD synchronization:
+  kport watch 8080 --until free --timeout 30
+  kport watch
+
+  # Atomic port reservation & handover:
+  kport hold 5000 --timeout 60
+  kport swap 8080 --command "npm start"
+
+  # AI Agent & MCP Server:
   kport mcp
 """,
     )
@@ -144,7 +165,14 @@ Examples:
 
     # Legacy flags
     parser.add_argument(
-        "-i", "--inspect", type=int, metavar="PORT", help="Inspect specified port"
+        "-i",
+        "--inspect",
+        nargs="?",
+        type=int,
+        const=-1,
+        default=None,
+        metavar="PORT",
+        help="Inspect specified port (or combine with -p/--pid to inspect by PID)",
     )
     parser.add_argument(
         "-im",
@@ -165,7 +193,14 @@ Examples:
         help="Inspect processes by name",
     )
     parser.add_argument(
-        "-k", "--kill", type=int, metavar="PORT", help="Kill processes using port"
+        "-k",
+        "--kill",
+        nargs="?",
+        type=int,
+        const=-1,
+        default=None,
+        metavar="PORT",
+        help="Kill processes using port (or combine with -p/--pid to kill by PID)",
     )
     parser.add_argument(
         "-kp", "--kill-process", type=str, metavar="NAME", help="Kill processes by name"
@@ -327,9 +362,25 @@ Examples:
     )
 
     sp_inspect = sub.add_parser(
-        "inspect", parents=[parent_parser], help="Inspect a port (docker-aware)"
+        "inspect",
+        parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport inspect",
+        description="Inspect network ports or processes, displaying protocol, process name, PID, user, CWD, and Docker status.",
+        help="Inspect a port or process (docker-aware)",
+        epilog="""
+Examples:
+  # Inspect port 8080:
+  kport inspect 8080
+
+  # Inspect process by PID:
+  kport inspect --pid 15768
+
+  # Output structured JSON:
+  kport inspect 8080 --json
+""",
     )
-    sp_inspect.add_argument("port", type=int, nargs="?")
+    sp_inspect.add_argument("port", type=int, nargs="?", help="Port number to inspect (optional if --pid or --profile is specified)")
     sp_inspect.add_argument(
         "--profile", type=str, help="Named port profile from config"
     )
@@ -338,43 +389,121 @@ Examples:
         "--pid",
         type=int,
         metavar="PID",
-        help="Process ID to inspect",
+        help="Process ID (PID) to inspect",
     )
 
     sp_explain = sub.add_parser(
-        "explain", parents=[parent_parser], help="Explain why a port is blocked"
+        "explain",
+        parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport explain",
+        description="Explain why a port is blocked, identifying managing supervisors (systemd, PM2, supervisord, Windows Service) and providing actionable stop commands.",
+        help="Explain why a port is blocked",
+        epilog="""
+Examples:
+  # Explain why port 8080 is unavailable:
+  kport explain 8080
+
+  # Output explanation as JSON:
+  kport explain 8080 --json
+""",
     )
-    sp_explain.add_argument("port", type=int)
+    sp_explain.add_argument("port", type=int, help="Port number to explain")
 
     sp_stop_service = sub.add_parser(
-        "stop-service", parents=[parent_parser], help="Cleanly stop the service manager controlling a port"
+        "stop-service",
+        parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport stop-service",
+        description="Cleanly stop the service manager (systemd, pm2, supervisord, Windows Service) controlling a port to prevent infinite restart loops.",
+        help="Cleanly stop the service manager controlling a port",
+        epilog="""
+Examples:
+  # Stop service controlling port 3000:
+  kport stop-service 3000
+
+  # Escalate to process kill if service stop fails:
+  kport stop-service 3000 --force
+
+  # Specify custom timeout in seconds:
+  kport stop-service 3000 --timeout 15
+""",
     )
-    sp_stop_service.add_argument("port", type=int)
+    sp_stop_service.add_argument("port", type=int, help="Port number controlled by service manager")
     sp_stop_service.add_argument(
         "--force", action="store_true", help="Escalate to process kill if service stop fails or port remains blocked"
     )
     sp_stop_service.add_argument(
-        "--timeout", type=float, default=30.0, help="Command timeout in seconds"
+        "--timeout", type=float, default=30.0, help="Command timeout in seconds (default: 30.0)"
     )
 
     sp_diagnose = sub.add_parser(
-        "diagnose", parents=[parent_parser], help="Structured analysis and fix recommendations for a port"
+        "diagnose",
+        parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport diagnose",
+        description="Structured semantic diagnostics for a port, providing observations, root-cause inferences, operational risks (loopback leaks, wildcard bindings), and actionable fix recommendations.",
+        help="Structured analysis and fix recommendations for a port",
+        epilog="""
+Examples:
+  # Run full diagnostic analysis on port 8080:
+  kport diagnose 8080
+
+  # Output diagnostic analysis in JSON:
+  kport diagnose 8080 --json
+""",
     )
-    sp_diagnose.add_argument("port", type=int)
+    sp_diagnose.add_argument("port", type=int, help="Port number to diagnose")
 
     sp_kill = sub.add_parser(
-        "kill", parents=[parent_parser], help="Safely free a port (docker-aware)"
+        "kill",
+        parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport kill",
+        description="Safely free an occupied port or terminate a process by PID (Docker and service aware).",
+        help="Safely free a port or kill by PID (docker-aware)",
+        epilog="""
+Examples:
+  # Kill process listening on port 8080 (interactive confirmation):
+  kport kill 8080
+
+  # Kill port 8080 without confirmation prompt:
+  kport kill 8080 --yes
+
+  # Kill a specific process by PID:
+  kport kill --pid 15768 --yes
+
+  # Force kill stubborn process and its descendants:
+  kport kill 8080 --force --kill-tree
+
+  # Stop service-managed port cleanly (systemd, pm2, Windows Service):
+  kport kill 3000 --service-aware
+
+  # Stop Docker container mapped to port 5432:
+  kport kill 5432 --docker-action stop
+
+  # Preview kill actions without executing:
+  kport kill 8080 --dry-run
+""",
     )
-    sp_kill.add_argument("port", type=int, nargs="?")
+    sp_kill.add_argument("port", type=int, nargs="?", help="Port number to free (optional if --pid or --profile is specified)")
     sp_kill.add_argument("--profile", type=str, help="Named port profile from config")
     sp_kill.add_argument(
         "--docker-action",
         choices=["stop", "restart", "rm"],
-        help="Action when port belongs to Docker",
+        help="Action when port belongs to Docker (default: prompt user)",
     )
-    sp_kill.add_argument("--force", action="store_true")
-    # FIX: default=None (consistent with top-level parser)
-    sp_kill.add_argument("--graceful-timeout", type=float, default=None)
+    sp_kill.add_argument(
+        "--force",
+        action="store_true",
+        help="Force kill stubborn processes (SIGKILL / Windows TerminateProcess)",
+    )
+    sp_kill.add_argument(
+        "--graceful-timeout",
+        type=float,
+        default=None,
+        help="Seconds to wait before force kill (default: 3.0)",
+    )
     sp_kill.add_argument(
         "--wait-for-exit",
         type=float,
@@ -392,17 +521,32 @@ Examples:
         "--pid",
         type=int,
         metavar="PID",
-        help="Process ID to kill",
+        help="Process ID (PID) to kill directly",
     )
 
     sp_kp = sub.add_parser(
-        "kill-process", parents=[parent_parser], help="Kill processes by name"
+        "kill-process",
+        parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport kill-process",
+        description="Terminate all running processes matching an executable or application name.",
+        help="Kill processes by name",
+        epilog="""
+Examples:
+  # Kill all processes matching 'node':
+  kport kill-process node
+
+  # Kill exact binary name match:
+  kport kill-process nginx --exact
+
+  # Force kill and terminate descendant process tree:
+  kport kill-process python --force --kill-tree --yes
+""",
     )
-    sp_kp.add_argument("name", type=str)
-    sp_kp.add_argument("--exact", action="store_true")
-    sp_kp.add_argument("--force", action="store_true")
-    # FIX: default=None (consistent with top-level parser)
-    sp_kp.add_argument("--graceful-timeout", type=float, default=None)
+    sp_kp.add_argument("name", type=str, help="Process name or runtime target to match")
+    sp_kp.add_argument("--exact", action="store_true", help="Require exact binary name match")
+    sp_kp.add_argument("--force", action="store_true", help="Force kill stubborn processes (SIGKILL / TerminateProcess)")
+    sp_kp.add_argument("--graceful-timeout", type=float, default=None, help="Seconds to wait before force kill (default: 3.0)")
     sp_kp.add_argument(
         "--kill-tree",
         action="store_true",
@@ -410,28 +554,92 @@ Examples:
     )
 
     _sp_list = sub.add_parser(
-        "list", parents=[parent_parser], help="List active ports (local + docker)"
+        "list",
+        parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport list",
+        description="List all active listening ports (local processes and Docker/Podman containers) with PID, process name, and binding address.",
+        help="List active ports (local + docker)",
+        epilog="""
+Examples:
+  # List all listening ports:
+  kport list
+
+  # Filter by Docker Compose project:
+  kport list --compose-project my-app
+
+  # Output in JSON format:
+  kport list --json
+""",
     )
 
     sp_docker = sub.add_parser(
-        "docker", parents=[parent_parser], help="List Docker-published ports"
+        "docker",
+        parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport docker",
+        description="List all published container port mappings from Docker and Podman.",
+        help="List Docker-published ports",
+        epilog="""
+Examples:
+  # List all published container ports:
+  kport docker
+
+  # Filter by Compose project:
+  kport docker --compose-project my-app
+""",
     )
     sp_docker.add_argument(
         "extra", nargs="*", help=argparse.SUPPRESS
     )  # absorb unknown args like 'list'
 
     _sp_conflicts = sub.add_parser(
-        "conflicts", parents=[parent_parser], help="Detect docker/local port conflicts"
+        "conflicts",
+        parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport conflicts",
+        description="Detect port collisions between local processes and Docker/Podman container mappings.",
+        help="Detect docker/local port conflicts",
     )
 
     sub.add_parser(
         "doctor",
         parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport doctor",
+        description="Environment-wide read-only diagnostic report detailing platform capabilities, active listeners, wildcard exposures, connection summary, and container status.",
         help="Environment-wide read-only diagnostic report",
+        epilog="""
+Examples:
+  # Run full system diagnostics report:
+  kport doctor
+
+  # Output doctor report in JSON:
+  kport doctor --json
+""",
     )
 
     sp_connections = sub.add_parser(
-        "connections", parents=[parent_parser], help="List active network connections"
+        "connections",
+        parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport connections",
+        description="High-performance network connection enumeration across TCP/UDP with filtering.",
+        help="List active network connections",
+        epilog="""
+Examples:
+  # List all active connections:
+  kport connections
+
+  # Filter connections by port:
+  kport connections --port 8080
+
+  # Filter connections by process ID:
+  kport connections --pid 15768
+
+  # Filter by state (e.g. ESTABLISHED, TIME_WAIT):
+  kport connections --state ESTABLISHED
+""",
     )
     sp_connections.add_argument(
         "--pid", type=int, help="Filter connections by process ID"
@@ -447,55 +655,117 @@ Examples:
     )
 
     sp_watch = sub.add_parser(
-        "watch", parents=[parent_parser], help="Live monitoring of port ownership"
+        "watch",
+        parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport watch",
+        description="Live monitoring of port ownership, state changes, and process transitions.",
+        help="Live monitoring of port ownership",
+        epilog="""
+Examples:
+  # Monitor port 8080 live in terminal:
+  kport watch 8080
+
+  # Global event-driven monitor for all active ports (Phase 4):
+  kport watch
+
+  # Block CI/CD pipeline until port 8080 is freed (exit 0 when free, timeout 30s):
+  kport watch 8080 --until free --timeout 30
+
+  # Wait until a server starts listening on port 3000:
+  kport watch 3000 --until occupied --timeout 60
+
+  # Monitor multiple ports with OS desktop notifications:
+  kport watch --ports 3000 8080 5432 --notify
+
+  # Monitor a port range with a 0.5s polling interval:
+  kport watch --range 8000-8010 --interval 0.5
+""",
     )
-    sp_watch.add_argument("port", type=int, nargs="?")
     sp_watch.add_argument(
-        "--ports", type=int, nargs="+", help="Multiple ports to watch"
+        "port",
+        type=int,
+        nargs="?",
+        help="Target port to monitor. If omitted, starts global event-driven watcher for all ports",
     )
     sp_watch.add_argument(
-        "--range", type=str, help="Range of ports to watch (e.g. 3000-3010)"
+        "--ports",
+        type=int,
+        nargs="+",
+        metavar="PORT",
+        help="Multiple ports to watch simultaneously (e.g. --ports 3000 8080 5432)",
     )
     sp_watch.add_argument(
-        "--interval", type=float, default=1.0, help="Polling interval in seconds"
+        "--range",
+        type=str,
+        metavar="START-END",
+        help="Range of ports to watch (e.g. --range 3000-3010)",
+    )
+    sp_watch.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        metavar="SECONDS",
+        help="Polling interval in seconds (default: 1.0)",
     )
     sp_watch.add_argument(
         "--notify",
         action="store_true",
-        help="Send OS desktop notification on state change",
+        help="Send OS desktop notification on port state change (connect/disconnect)",
     )
     sp_watch.add_argument(
         "--until",
         choices=["free", "occupied"],
-        help="Block until port matches state ('free' or 'occupied') and exit 0",
+        help="Block execution until port matches state ('free' or 'occupied') and exit 0",
     )
     sp_watch.add_argument(
         "--timeout",
         type=float,
-        help="Maximum time in seconds to wait when using --until, or total watch duration",
+        metavar="SECONDS",
+        help="Maximum seconds to wait when using --until, or total watch duration",
     )
 
     sub.add_parser(
         "watcher-info",
         parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport watcher-info",
+        description="Show platform-specific watcher acceleration details (Linux /proc or Windows GetExtendedTcpTable).",
         help="Show platform-specific watcher acceleration details (Phase 4)",
     )
 
     sub.add_parser(
         "mcp",
         parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport mcp",
+        description="Start the Model Context Protocol (MCP) JSON-RPC server on stdio for AI agent pairing.",
         help="Start the stdio Model Context Protocol (MCP) server",
     )
     sub.add_parser(
         "interactive",
         parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport interactive",
+        description="Launch visual interactive Text User Interface (TUI) port picker with search, filtering, and selection.",
         help="Launch interactive TUI port picker",
     )
 
     sp_completion = sub.add_parser(
         "completion",
         parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport completion",
+        description="Generate shell autocompletion scripts for bash, zsh, fish, or powershell.",
         help="Generate shell autocompletion scripts",
+        epilog="""
+Examples:
+  # PowerShell completion:
+  kport completion powershell | Out-String | Invoke-Expression
+
+  # Bash completion:
+  eval "$(kport completion bash)"
+""",
     )
     sp_completion.add_argument(
         "shell", choices=["bash", "zsh", "fish", "powershell"], help="Target shell"
@@ -504,7 +774,18 @@ Examples:
     sp_setup_sudo = sub.add_parser(
         "setup-sudo",
         parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport setup-sudo",
+        description="Install a /usr/local/bin/kport launcher so 'sudo kport' works from pip/pipx installs.",
         help="Install a /usr/local/bin/kport launcher so 'sudo kport' works from pip/pipx installs",
+        epilog="""
+Examples:
+  # Install standard sudo launcher:
+  sudo kport setup-sudo
+
+  # Install to custom path:
+  sudo kport setup-sudo --target /usr/bin/kport
+""",
     )
     sp_setup_sudo.add_argument(
         "--target",
@@ -517,7 +798,18 @@ Examples:
     sp_hold = sub.add_parser(
         "hold",
         parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport hold",
+        description="Temporarily bind and reserve a port to block other applications or daemons from taking it.",
         help="Temporarily bind and reserve a port to block other applications",
+        epilog="""
+Examples:
+  # Hold port 5000 until Enter or Ctrl+C is pressed:
+  kport hold 5000
+
+  # Hold port 5000 for 30 seconds, then automatically release:
+  kport hold 5000 --timeout 30
+""",
     )
     sp_hold.set_defaults(proto="tcp")
     sp_hold.add_argument("port", type=int, help="Port number to hold/reserve")
@@ -532,7 +824,21 @@ Examples:
     sp_swap = sub.add_parser(
         "swap",
         parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport swap",
+        description="Atomically free an occupied port, hold it with an exclusive socket to prevent race conditions, and optionally hand it over to a replacement command.",
         help="Atomically free a port and hold/hand over to prevent race conditions",
+        epilog="""
+Examples:
+  # Free port 8080 and hold it until ready:
+  kport swap 8080
+
+  # Free port 8080 and atomically launch replacement service:
+  kport swap 8080 --command "npm start"
+
+  # Force kill existing process if needed:
+  kport swap 8080 --force --command "python app.py"
+""",
     )
     sp_swap.add_argument("port", type=int, help="Target port to swap and hold")
     sp_swap.add_argument(
@@ -559,7 +865,21 @@ Examples:
     sp_audit = sub.add_parser(
         "audit",
         parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="kport audit",
+        description="Inspect audit log history of destructive kport actions (kills, stops, swaps) with filtering and SIEM/CEF export.",
         help="Inspect audit log history of destructive kport actions",
+        epilog="""
+Examples:
+  # View recent audit history:
+  kport audit
+
+  # Export audit log in SIEM Common Event Format (CEF):
+  kport audit --format siem --export audit.cef
+
+  # Output recent audit entries as JSON:
+  kport audit --format json --limit 50
+""",
     )
     sp_audit.add_argument(
         "--limit",

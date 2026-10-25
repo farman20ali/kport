@@ -2743,7 +2743,25 @@ def handle_product_command(args: argparse.Namespace, inspector: BaseInspector) -
 
 def handle_legacy_command(args: argparse.Namespace, inspector: BaseInspector) -> int:
     """Execute business workflows for legacy flags."""
+    # Standalone -k without PORT and without --pid
+    if getattr(args, "kill", None) == -1 and getattr(args, "pid", None) is None:
+        print(
+            colorize("Error: -k/--kill requires a PORT, or specify a PID with -p/--pid.", Colors.RED),
+            file=sys.stderr,
+        )
+        return EXIT_INVALID_INPUT
+
+    # Standalone -i without PORT and without --pid
+    if getattr(args, "inspect", None) == -1 and getattr(args, "pid", None) is None:
+        print(
+            colorize("Error: -i/--inspect requires a PORT, or specify a PID with -p/--pid.", Colors.RED),
+            file=sys.stderr,
+        )
+        return EXIT_INVALID_INPUT
+
     if getattr(args, "pid", None) is not None:
+        if getattr(args, "kill", None) is not None:
+            return handle_kill_pid_cli(args, inspector)
         return handle_inspect_pid_cli(args, inspector)
 
     # List ports

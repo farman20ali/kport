@@ -71,3 +71,37 @@ def test_watch_times_out_when_condition_never_met(capsys):
     last_event = json.loads(lines[-1])
     assert last_event["event"] == "timeout"
     assert last_event["success"] is False
+
+
+@pytest.mark.cli
+def test_watch_help_contains_examples_and_flags(capsys):
+    """Verify that 'kport watch --help' outputs examples and detailed flag help."""
+    from kport.cli import main
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["watch", "--help"])
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "Examples:" in out
+    assert "kport watch 8080 --until free" in out
+    assert "Global event-driven monitor" in out
+    assert "--until" in out
+    assert "--notify" in out
+    assert "--timeout" in out
+
+
+@pytest.mark.cli
+def test_kill_help_contains_examples_and_pid_flag(capsys):
+    """Verify that 'kport kill --help' outputs examples and --pid flag help."""
+    from kport.cli import main
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["kill", "--help"])
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "Examples:" in out
+    assert "kport kill --pid 15768 --yes" in out
+    assert "-p, --pid" in out
+    assert "--force" in out
+    assert "--service-aware" in out
+
