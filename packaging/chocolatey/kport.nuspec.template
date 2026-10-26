@@ -8,6 +8,7 @@
     <owners>alienhub</owners>
     <projectUrl>https://github.com/farman20ali/kport</projectUrl>
     <licenseUrl>https://github.com/farman20ali/kport/blob/main/LICENSE</licenseUrl>
+    <copyright>Copyright 2026 Farman Ali Ujjan</copyright>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <projectSourceUrl>https://github.com/farman20ali/kport/tree/main/src/kport</projectSourceUrl>
     <packageSourceUrl>https://github.com/farman20ali/kport/tree/main/packaging/chocolatey</packageSourceUrl>
